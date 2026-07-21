@@ -43,7 +43,8 @@ const fatal = (msg: string): never => {
 }
 
 /*  the supported AI agent harness types  */
-type Harness = "claude" | "codex" | "copilot"
+const harnessTypes = [ "claude", "codex", "copilot" ] as const
+type Harness = (typeof harnessTypes)[number]
 
 /*  parse the command-line options (flags take precedence over environment variables)  */
 const program = new Command()
@@ -57,7 +58,7 @@ program
     .addOption(new Option("-t, --mcp-tool <tool>", "MCP tool name")
         .env("MCP_TOOL"))
     .addOption(new Option("-a, --harness <type>", "AI agent harness type")
-        .choices([ "claude", "codex", "copilot" ])
+        .choices(harnessTypes)
         .env("HARNESS"))
     .addOption(new Option("-c, --harness-command <command>", "AI agent harness CLI command")
         .env("HARNESS_COMMAND"))
