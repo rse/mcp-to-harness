@@ -1,0 +1,58 @@
+{
+    "name":                          "mcp-to-harness",
+    "homepage":                      "https://github.com/rse/mcp-to-harness",
+    "description":                   "Bridge an MCP \"chat\" tool to an AI agent harness CLI",
+    "keywords":                      [ "mcp", "bridge", "harness", "agent", "chat", "llm", "cli", "claude", "codex", "copilot" ],
+    "version":                       "0.9.0",
+    "license":                       "MIT",
+    "author": {
+        "name":                      "Dr. Ralf S. Engelschall",
+        "email":                     "rse@engelschall.com",
+        "url":                       "http://engelschall.com"
+    },
+    "repository":                    { "type": "git", "url":  "git+https://github.com/rse/mcp-to-harness.git" },
+    "bugs":                          { "url":  "http://github.com/rse/mcp-to-harness/issues" },
+    "bin": {
+        "mcp-to-harness":            "dist/mcp-to-harness.js"
+    },
+    "type":                          "module",
+    "dependencies": {
+        "@dotenvx/dotenvx":                 "2.15.1",
+        "@modelcontextprotocol/sdk":        "1.29.0",
+        "commander":                        "15.0.0",
+        "execa":                            "10.0.0",
+        "zod":                              "4.4.3"
+    },
+    "devDependencies": {
+        "mocha":                            "11.7.6",
+        "@types/mocha":                     "10.0.10",
+        "tsx":                              "4.23.1",
+        "eslint":                           "9.39.5",
+        "@eslint/js":                       "9.39.5",
+        "typescript-eslint":                "8.65.0",
+        "eslint-plugin-promise":            "7.3.0",
+        "eslint-plugin-import":             "2.32.0",
+        "neostandard":                      "0.13.0",
+        "globals":                          "17.7.0",
+        "@types/node":                      "26.1.1",
+        "typescript":                       "6.0.3"
+    },
+    "engines": {
+        "node":                             ">=24.0.0"
+    },
+    "allowScripts": {
+        "fsevents":                         true,
+        "esbuild":                          true
+    },
+    "scripts": {
+        "lint":           "eslint --config eslint.mjs",
+        "build":          "tsc --project tsconfig.json && chmod +x dist/mcp-to-harness.js",
+        "prepublishOnly": "npm run lint && npm run build",
+        "test":           "npm run build && mocha --node-option import=tsx mcp-to-harness.spec.ts",
+        "start":          "node dist/mcp-to-harness.js"
+    },
+    "files": [
+        "dist",
+        "mcp-to-harness.ts"
+    ]
+}
