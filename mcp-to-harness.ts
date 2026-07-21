@@ -349,11 +349,11 @@ server.registerTool(
 )
 
 /*  main entry point  */
-async function main () {
+const main = async (): Promise<void> => {
     const transport = new StdioServerTransport()
     await server.connect(transport)
 }
-main().catch((error) => {
+main().catch((error: unknown) => {
     const msg = error instanceof Error ? error.message : String(error)
     fatal(msg)
 })
