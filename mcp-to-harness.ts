@@ -43,7 +43,7 @@ const fatal = (msg: string): never => {
 }
 
 /*  the supported AI agent harness types  */
-const harnessTypes = [ "claude", "codex", "copilot" ] as const
+const harnessTypes = [ "claude", "codex", "copilot", "kimi" ] as const
 type Harness = (typeof harnessTypes)[number]
 
 /*  parse the command-line options (flags take precedence over environment variables)  */
@@ -125,7 +125,8 @@ const envAllowlistCommon = [
 const envAllowlistHarness: Record<Harness, string[]> = {
     claude:  [ "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME" ],
     codex:   [ "CODEX_HOME",        "XDG_CONFIG_HOME" ],
-    copilot: [ "GITHUB_TOKEN",      "GH_TOKEN",          "XDG_CONFIG_HOME" ]
+    copilot: [ "GITHUB_TOKEN",      "GH_TOKEN",          "XDG_CONFIG_HOME" ],
+    kimi:    [ "KIMI_API_KEY",      "KIMI_BASE_URL",     "KIMI_MODEL_NAME", "KIMI_SHARE_DIR", "KIMI_CLI_NO_AUTO_UPDATE" ]
 }
 
 /*  the harness-specific CLI invocation  */
@@ -133,6 +134,47 @@ interface Invocation {
     args:    string[]
     input:   string
     output?: string
+}
+
+/*  the Kimi CLI agent definition (and its mandatory, neutral system
+    prompt) materialized into the throw-away working directory for the
+    "kimi" harness: Kimi CLI exposes no flag to disable its built-in
+    tools, so the only way to strip them is a custom agent file with an
+    empty tool list -- note this removes the built-in tools but not
+    installed plugin tools (see the kimi branch below); the
+    "system_prompt_path" field is mandatory and is resolved relative to
+    the agent file  */
+const kimiAgentFile =
+    "version: 1\n" +
+    "agent:\n" +
+    "  name: mcp-to-harness\n" +
+    "  system_prompt_path: ./system.md\n" +
+    "  tools: []\n"
+const kimiSystemPrompt =
+    "You are a helpful assistant used as a one-shot chat-completion service. " +
+    "Do not use any tools. " +
+    "Answer the user's request directly and accurately from your own knowledge.\n"
+
+/*  an empty MCP configuration in Kimi CLI's own schema, materialized and
+    passed via "--mcp-config-file" so it overrides (rather than merges
+    with) the user's default "~/.kimi/mcp.json"  */
+const kimiMcpConfig = "{ \"mcpServers\": {} }\n"
+
+/*  the per-harness input asset files written into the throw-away working
+    directory before the harness runs: most harnesses need none, but the
+    "kimi" harness has no flag to disable its built-in tools or to ignore
+    the user's MCP config, so it needs a tool-empty agent definition (with
+    the neutral system prompt it references by a relative path) and an
+    empty MCP configuration supplied as files  */
+const harnessAssets: Record<Harness, { name: string, content: string }[]> = {
+    claude:  [],
+    codex:   [],
+    copilot: [],
+    kimi:    [
+        { name: "agent.yaml", content: kimiAgentFile },
+        { name: "system.md",  content: kimiSystemPrompt },
+        { name: "mcp.json",   content: kimiMcpConfig }
+    ]
 }
 
 /*  assemble the harness-specific, strictly non-interactive CLI invocation:
@@ -205,7 +247,7 @@ const assembleInvocation = (harness: Harness, prompt: string, dir: string): Invo
         const input = HARNESS_PROMPT !== undefined ? `${HARNESS_PROMPT}\n\n${prompt}` : prompt
         return { args, input, output }
     }
-    else {
+    else if (harness === "copilot") {
         /*  GitHub Copilot CLI (flags verified against 1.0.x):
             non-interactive prompt mode with response-only output, no
             coloring, an empty available-tools list (strips all tools from
@@ -233,6 +275,43 @@ const assembleInvocation = (harness: Harness, prompt: string, dir: string): Invo
             args.push("--model", HARNESS_MODEL)
         return { args, input: "" }
     }
+    else {
+        /*  Moonshot Kimi CLI (flags verified against 1.49.x): quiet
+            one-shot mode ("--quiet" is the CLI's shortcut for "--print
+            --output-format text --final-message-only") emitting only the
+            final plain-text message, rooted in the throw-away temporary
+            working directory ("--work-dir"), user/project skill
+            auto-discovery replaced by the (empty) temp directory
+            ("--skills-dir"), the user's MCP registrations displaced by an
+            empty materialized MCP config ("--mcp-config-file" overrides
+            the default "~/.kimi/mcp.json" instead of merging with it,
+            unlike the additive "--mcp-config"), and the built-in tools
+            removed via a materialized agent definition with an empty tool
+            list ("--agent-file"), since the CLI has no tool-disabling
+            flag. This is weaker containment than the other harnesses: the
+            CLI still loads installed plugin tools (auto-approved in print
+            mode), runs user-config hooks as shell commands on start,
+            honours additive "extra_skill_dirs" / plugin skills, and
+            persists the session under the Kimi share directory -- none of
+            which a flag can suppress. Full isolation therefore requires
+            the operator to relocate a sanitized share via "$KIMI_SHARE_DIR"
+            (see README). The prompt is passed on stdin, the optional
+            system prompt is prepended as a preamble (the CLI offers no
+            separate system prompt channel)  */
+        const agentFile = path.join(dir, "agent.yaml")
+        const mcpConfig = path.join(dir, "mcp.json")
+        const args = [
+            "--quiet",
+            "--work-dir",        dir,
+            "--skills-dir",      dir,
+            "--mcp-config-file", mcpConfig,
+            "--agent-file",      agentFile
+        ]
+        if (HARNESS_MODEL !== undefined)
+            args.push("--model", HARNESS_MODEL)
+        const input = HARNESS_PROMPT !== undefined ? `${HARNESS_PROMPT}\n\n${prompt}` : prompt
+        return { args, input }
+    }
 }
 
 /*  query the AI agent harness CLI in a strictly non-interactive fashion and
@@ -247,6 +326,13 @@ const queryHarness = async (prompt: string, signal?: AbortSignal): Promise<strin
     try {
         /*  assemble the harness-specific CLI invocation  */
         const invocation = assembleInvocation(HARNESS, prompt, dir)
+
+        /*  materialize the per-harness input asset files (currently the
+            kimi harness's built-in-tool-empty agent definition, its system
+            prompt, and an empty MCP config) into the throw-away working
+            directory before running the harness  */
+        for (const asset of harnessAssets[HARNESS])
+            await fs.writeFile(path.join(dir, asset.name), asset.content, "utf8")
 
         /*  build a minimized child environment from the explicit
             allowlist (never the inherited parent environment) and force

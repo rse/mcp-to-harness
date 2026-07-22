@@ -2,7 +2,7 @@
     "name":                          "mcp-to-harness",
     "homepage":                      "https://github.com/rse/mcp-to-harness",
     "description":                   "Bridge an MCP \"chat\" tool to an AI agent harness CLI",
-    "keywords":                      [ "mcp", "bridge", "harness", "agent", "chat", "llm", "cli", "claude", "codex", "copilot" ],
+    "keywords":                      [ "mcp", "bridge", "harness", "agent", "chat", "llm", "cli", "claude", "codex", "copilot", "kimi" ],
     "version":                       "0.9.1",
     "license":                       "MIT",
     "author": {

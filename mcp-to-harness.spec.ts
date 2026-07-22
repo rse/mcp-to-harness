@@ -12,6 +12,8 @@
     tests of harnesses which are not installed are skipped  */
 
 /*  built-in dependencies  */
+import os                       from "node:os"
+import fs                       from "node:fs"
 import path                     from "node:path"
 import assert                   from "node:assert/strict"
 import { spawn, execSync }      from "node:child_process"
@@ -128,7 +130,7 @@ const promptSystem  = "You must always answer with exactly the single word BANAN
 const promptEssay   = "Write a detailed 1000 word essay about the history of computing."
 
 /*  the per-harness tests: plain query and system prompt round-trip  */
-for (const harness of [ "claude", "codex", "copilot" ] as const) {
+for (const harness of [ "claude", "codex", "copilot", "kimi" ] as const) {
     describe(`harness ${harness}`, () => {
         const itHarness  = missing(harness) ? it.skip : it
         const serverArgs = [
@@ -258,5 +260,93 @@ describe("special cases", () => {
             client.close()
         }
     }).timeout(120000).slow(60000)
+})
+
+/*  the kimi containment test: the kimi harness supplies part of its
+    containment through materialized asset files -- a built-in-tool-empty
+    agent definition and an empty explicit MCP config -- rather than pure
+    flags, so a fake harness command (a small script that reports its
+    canonicalized working directory, its full argument vector, and the
+    contents of the files its own "--mcp-config-file" / "--agent-file"
+    arguments point at) lets the enforced inputs be asserted by value,
+    without a real, installed kimi CLI (skipped on Windows, where the
+    POSIX script cannot run)  */
+describe("kimi containment", () => {
+    const itKimi = process.platform === "win32" ? it.skip : it
+    itKimi("materializes a built-in-tool-empty agent and an empty explicit MCP config in the throw-away directory", async () => {
+        const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-to-harness-fake-"))
+        const fakeCmd = path.join(fakeDir, "fake-harness.sh")
+        fs.writeFileSync(fakeCmd,
+            "#!/bin/sh\n" +
+            "echo \"CWD=$(pwd -P)\"\n" +
+            "prev=\"\"\n" +
+            "for a in \"$@\"; do\n" +
+            "    echo \"ARG=$a\"\n" +
+            "    case \"$prev\" in\n" +
+            "        --work-dir)        echo \"WORKDIR=$(cd \"$a\" 2>/dev/null && pwd -P)\" ;;\n" +
+            "        --mcp-config-file) echo \"MCP<<\"; cat \"$a\"; echo \">>MCP\" ;;\n" +
+            "        --agent-file)      echo \"AGENT<<\"; cat \"$a\"; echo \">>AGENT\" ;;\n" +
+            "    esac\n" +
+            "    prev=\"$a\"\n" +
+            "done\n",
+            { mode: 0o755 })
+        const client = new MCPClient([
+            "--service",         "Test kimi",
+            "--mcp-tool",        "chat-kimi",
+            "--harness",         "kimi",
+            "--harness-command", fakeCmd,
+            "--harness-model",   "test-model"
+        ])
+        try {
+            await client.initialize()
+            const result = await client.callTool("chat-kimi", promptMath)
+            assert.notEqual(result.isError, true)
+            const lines = result.content[0].text.split("\n")
+            const valueLine = (prefix: string): string | undefined => {
+                const line = lines.find((l) => l.startsWith(prefix))
+                return line === undefined ? undefined : line.slice(prefix.length)
+            }
+            const args = lines.filter((l) => l.startsWith("ARG=")).map((l) => l.slice(4))
+            const block = (start: string, end: string): string =>
+                lines.slice(lines.indexOf(start) + 1, lines.indexOf(end)).join("\n")
+
+            /*  with an explicit "--harness-model" the invocation is a
+                fixed vector (the explicit flag also overrides any ambient
+                $HARNESS_MODEL, so the process environment cannot perturb
+                it), so assert the whole argument list by value -- exact
+                tokens, exact order, nothing extra. This rejects every
+                alias, "--flag=value" and repeated-option form (e.g. "-w",
+                a second "--skills-dir", an additive "--mcp-config=...")
+                that the kimi CLI would still act on but that a token-name
+                count would miss. The variable throw-away path sits at
+                args[2]; the remaining paths are pinned relative to it  */
+            const workDir = args[2]
+            assert.deepEqual(args, [
+                "--quiet",
+                "--work-dir",        workDir,
+                "--skills-dir",      workDir,
+                "--mcp-config-file", path.join(workDir, "mcp.json"),
+                "--agent-file",      path.join(workDir, "agent.yaml"),
+                "--model",           "test-model"
+            ])
+
+            /*  and that args[2] is the process's actual working directory,
+                compared fully and canonicalized on both sides while the
+                directory still exists, so a different parent with the same
+                leaf name cannot pass  */
+            assert.equal(valueLine("WORKDIR="), valueLine("CWD="))
+
+            /*  the file behind --mcp-config-file (read by the fake harness
+                at that very path) has a truly empty server map, so it
+                overrides rather than merges the user's default, and the
+                file behind --agent-file disables the built-in tools  */
+            assert.deepEqual(JSON.parse(block("MCP<<", ">>MCP")).mcpServers, {})
+            assert.match(block("AGENT<<", ">>AGENT"), /^\s*tools:\s*\[\]\s*$/m)
+        }
+        finally {
+            client.close()
+            fs.rmSync(fakeDir, { recursive: true, force: true })
+        }
+    }).timeout(30000)
 })
 
