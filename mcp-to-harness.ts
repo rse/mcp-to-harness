@@ -9,8 +9,8 @@
 import os                       from "node:os"
 import path                     from "node:path"
 import fs                       from "node:fs/promises"
+import fsSync                   from "node:fs"
 import process                  from "node:process"
-import { readFileSync, existsSync } from "node:fs"
 import { fileURLToPath }        from "node:url"
 
 /*  external dependencies  */
@@ -26,10 +26,10 @@ import { z }                    from "zod"
     resolves both when run as source and when run as compiled dist/ output)  */
 const pkgFile = [ "./package.json", "../package.json" ]
     .map((rel)  => fileURLToPath(new URL(rel, import.meta.url)))
-    .find((file) => existsSync(file))
+    .find((file) => fsSync.existsSync(file))
 if (pkgFile === undefined)
     throw new Error("cannot locate package.json")
-const pkg = JSON.parse(readFileSync(pkgFile, "utf8")) as
+const pkg = JSON.parse(fsSync.readFileSync(pkgFile, "utf8")) as
     { name: string, version: string }
 
 /*  load potential .env file into the environment
@@ -105,8 +105,8 @@ const HARNESS_PROMPT   = opts.harnessPrompt
 const HARNESS_TIMEOUT  = opts.harnessTimeout
 
 /*  parse and validate the execution timeout  */
-const timeoutMs = parseInt(HARNESS_TIMEOUT, 10)
-if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+const timeoutMs = Number(HARNESS_TIMEOUT)
+if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
     fatal(`invalid harness timeout "${HARNESS_TIMEOUT}" (use a positive integer of milliseconds)`)
 
 /*  the minimal set of parent environment variables passed through to the
@@ -205,7 +205,7 @@ const assembleInvocation = (harness: Harness, prompt: string, dir: string): Invo
         const input = HARNESS_PROMPT !== undefined ? `${HARNESS_PROMPT}\n\n${prompt}` : prompt
         return { args, input, output }
     }
-    else {
+    else if (harness === "copilot") {
         /*  GitHub Copilot CLI (flags verified against 1.0.x):
             non-interactive prompt mode with response-only output, no
             coloring, an empty available-tools list (strips all tools from
@@ -233,6 +233,11 @@ const assembleInvocation = (harness: Harness, prompt: string, dir: string): Invo
             args.push("--model", HARNESS_MODEL)
         return { args, input: "" }
     }
+    else {
+        /*  exhaustiveness guard for a future harness type  */
+        const unhandled: never = harness
+        throw new Error(`unsupported harness type "${String(unhandled)}"`)
+    }
 }
 
 /*  query the AI agent harness CLI in a strictly non-interactive fashion and
@@ -250,9 +255,9 @@ const queryHarness = async (prompt: string, signal?: AbortSignal): Promise<strin
 
         /*  build a minimized child environment from the explicit
             allowlist (never the inherited parent environment) and force
-            headless mode so that -- when the child harness has session
-            banner emitting hooks installed -- those hooks can suppress
-            their banner instead of leaking it into the captured answer  */
+            headless mode so that -- when the child harness has hooks
+            installed which emit a session banner -- those hooks can
+            suppress it instead of leaking it into the captured answer  */
         const env: Record<string, string> = { ASE_HEADLESS: "true" }
         for (const key of [ ...envAllowlistCommon, ...envAllowlistHarness[HARNESS] ])
             if (process.env[key] !== undefined)
