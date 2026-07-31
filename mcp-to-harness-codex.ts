@@ -117,7 +117,8 @@ export const codexDriver: HarnessDriver = {
             rpc.failAll(`harness CLI worker process exited unexpectedly${detail}`)
         })
 
-        /*  perform the MCP handshake, bounded by a fixed spawn timeout  */
+        /*  perform the MCP handshake, bounded by a fixed spawn timeout,
+            never leaving a still-running child behind on failure  */
         await raceDeadline((async () => {
             await rpc.request("initialize", {
                 protocolVersion: "2025-06-18",
@@ -128,8 +129,13 @@ export const codexDriver: HarnessDriver = {
         })(), 30000, undefined, () => {
             isBroken = true
             child.kill("SIGKILL")
+        }).catch(async (err: unknown) => {
+            isBroken = true
+            await killChild(child)
+            throw err
         })
 
+        /*  expose the harness worker interface  */
         const worker: HarnessWorker = {
             broken: () => isBroken,
             async query (prompt: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {

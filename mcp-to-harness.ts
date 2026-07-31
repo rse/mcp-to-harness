@@ -28,7 +28,7 @@ import { claudeDriver }                                              from "./mcp
 import { codexDriver }                                               from "./mcp-to-harness-codex.js"
 import { copilotDriver }                                             from "./mcp-to-harness-copilot.js"
 
-/*  internal dependencies
+/*  own package information
     (read package.json at run-time relative to this module, so it
     resolves both when run as source and when run as compiled dist/ output)  */
 const pkgFile = [ "./package.json", "../package.json" ]
@@ -229,7 +229,7 @@ const queryHarnessOneShot = async (prompt: string, signal?: AbortSignal): Promis
 /*  the worker pool for persistent harness CLI processes: workers are
     spawned lazily on demand (so the worst case equals the one-shot
     behavior), reused when idle, retired after an idle period, after a
-    maximum number of uses, or whenever they broke -- a request timeout
+    maximum number of uses, or whenever they break -- a request timeout
     or cancellation simply kills the worker, since the pool respawns
     lazily and a poisoned conversation must never leak into the next
     request  */
@@ -281,6 +281,11 @@ const queryHarnessPooled = async (prompt: string, signal?: AbortSignal): Promise
         poolSlotsInUse++
     let entry: PoolEntry | undefined
     try {
+        /*  fail fast when the request got canceled while awaiting
+            the capacity slot, instead of spawning a worker just to fail  */
+        if (signal?.aborted === true)
+            throw new Error("harness CLI execution was canceled")
+
         /*  reuse an idle worker, retiring the ones found broken  */
         for (;;) {
             entry = pool.find((e) => !e.busy)

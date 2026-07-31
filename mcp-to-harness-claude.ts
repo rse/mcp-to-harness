@@ -58,7 +58,7 @@ export const claudeDriver: HarnessDriver = {
         command which verifiably resets the conversation to a fresh
         session (new session id, no context carry-over) while retaining
         the "--system-prompt" and "--model" settings  */
-    spawnWorker (config: HarnessConfig, dir: string, env: Record<string, string>): Promise<HarnessWorker> {
+    async spawnWorker (config: HarnessConfig, dir: string, env: Record<string, string>): Promise<HarnessWorker> {
         const args = [
             "--print",
             "--input-format",  "stream-json",
@@ -82,6 +82,10 @@ export const claudeDriver: HarnessDriver = {
         let isVirgin   = true
         child.stderr.on("data", (chunk: Buffer) => {
             stderrTail = (stderrTail + chunk.toString()).slice(-4096)
+        })
+        child.stdin.on("error", () => {
+            /*  intentionally ignored: an asynchronous write failure is
+                already surfaced through the "close" handler  */
         })
         child.on("error", (error: Error) => {
             isBroken = true
@@ -143,8 +147,11 @@ export const claudeDriver: HarnessDriver = {
                         when a previous request died mid-turn, and is
                         skipped only on a virgin process where there is
                         nothing to reset yet  */
-                    if (!isVirgin)
-                        await turn("/clear")
+                    if (!isVirgin) {
+                        const cleared = await turn("/clear")
+                        if (cleared.subtype !== "success" || cleared.is_error === true)
+                            throw new Error("harness CLI failed to reset the conversation")
+                    }
                     isVirgin = false
                     const event = await turn(prompt)
                     if (event.subtype !== "success" || event.is_error === true)
@@ -161,7 +168,7 @@ export const claudeDriver: HarnessDriver = {
                 await killChild(child)
             }
         }
-        return Promise.resolve(worker)
+        return worker
     }
 }
 

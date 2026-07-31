@@ -43,7 +43,10 @@ const missing = (command: string): boolean => {
 /*  count the still running processes matching a pattern  */
 const processCount = (pattern: string): number => {
     try {
-        return parseInt(execSync(`pgrep -f "${pattern}" | wc -l`).toString().trim(), 10)
+        /*  bracket the first pattern character so the shell running
+            this very pgrep pipeline does not match itself  */
+        const regex = pattern.replace(/^(.)/, "[$1]")
+        return parseInt(execSync(`pgrep -f "${regex}" | wc -l`).toString().trim(), 10)
     }
     catch {
         return 0
@@ -58,10 +61,10 @@ const delay = (ms: number): Promise<void> =>
 class MCPClient {
     private child: ChildProcess
     private buffer = ""
-    private pending = new Map<number, (msg: RPCMessage) => void>()
+    private pending = new Map<number, { resolve: (msg: RPCMessage) => void, reject: (err: Error) => void }>()
     private id = 0
     constructor (serverArgs: string[]) {
-        this.child = spawn("node", [ cli, ...serverArgs ], { stdio: [ "pipe", "pipe", "pipe" ] })
+        this.child = spawn("node", [ cli, ...serverArgs ], { stdio: [ "pipe", "pipe", "inherit" ] })
         this.child.stdout?.on("data", (chunk: Buffer) => {
             this.buffer += chunk.toString()
             let idx: number
@@ -70,15 +73,22 @@ class MCPClient {
                 this.buffer = this.buffer.slice(idx + 1)
                 if (line.trim() === "")
                     continue
-                const msg = JSON.parse(line) as RPCMessage
+                let msg: RPCMessage
+                try { msg = JSON.parse(line) as RPCMessage }
+                catch { continue } /*  intentionally ignored: non-JSON noise line  */
                 if (msg.id !== undefined) {
-                    const resolve = this.pending.get(msg.id)
-                    if (resolve !== undefined) {
+                    const entry = this.pending.get(msg.id)
+                    if (entry !== undefined) {
                         this.pending.delete(msg.id)
-                        resolve(msg)
+                        entry.resolve(msg)
                     }
                 }
             }
+        })
+        this.child.on("close", () => {
+            for (const entry of this.pending.values())
+                entry.reject(new Error("MCP server process exited unexpectedly"))
+            this.pending.clear()
         })
     }
     send (msg: object): void {
@@ -86,8 +96,8 @@ class MCPClient {
     }
     request (method: string, params: object): Promise<RPCMessage> {
         const id = ++this.id
-        const promise = new Promise<RPCMessage>((resolve) => {
-            this.pending.set(id, resolve)
+        const promise = new Promise<RPCMessage>((resolve, reject) => {
+            this.pending.set(id, { resolve, reject })
         })
         this.send({ jsonrpc: "2.0", id, method, params })
         return promise

@@ -127,7 +127,7 @@ export const copilotDriver: HarnessDriver = {
             tail of the stderr output for diagnostics, and whether the
             process is still usable  */
         let activeSession: string | undefined
-        let chunks: string[] = []
+        let chunks:        string[] = []
         let stderrTail = ""
         let isBroken   = false
         child.stderr.on("data", (chunk: Buffer) => {
@@ -147,8 +147,11 @@ export const copilotDriver: HarnessDriver = {
             }
             else if (msg.id !== undefined && msg.method === "session/request_permission") {
                 const options = (msg.params as AcpPermissionParams).options ?? []
-                const option  = options.find((o) => o.kind?.startsWith("reject")) ?? options[0]
-                rpc.respond(msg.id, { outcome: { outcome: "selected", optionId: option?.optionId } })
+                const option  = options.find((o) => o.kind?.startsWith("reject"))
+                if (option !== undefined)
+                    rpc.respond(msg.id, { outcome: { outcome: "selected", optionId: option.optionId } })
+                else
+                    rpc.respond(msg.id, { outcome: { outcome: "cancelled" } })
             }
             else if (msg.id !== undefined && msg.method !== undefined)
                 rpc.respondError(msg.id, -32601, "not supported by mcp-to-harness")
@@ -172,6 +175,11 @@ export const copilotDriver: HarnessDriver = {
         }), 30000, undefined, () => {
             isBroken = true
             child.kill("SIGKILL")
+        }).catch(async (err: unknown) => {
+            /*  a failed handshake must not leak a still running process  */
+            isBroken = true
+            await killChild(child)
+            throw err
         })
 
         const worker: HarnessWorker = {

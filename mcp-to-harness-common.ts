@@ -66,8 +66,9 @@ export const envAllowlistCommon = [
 /*  attach a newline-splitting reader to a readable stream  */
 export const onLines = (stream: Readable, onLine: (line: string) => void): void => {
     let buffer = ""
-    stream.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString()
+    stream.setEncoding("utf8")
+    stream.on("data", (chunk: string) => {
+        buffer += chunk
         let idx: number
         while ((idx = buffer.indexOf("\n")) >= 0) {
             const line = buffer.slice(0, idx)
@@ -145,20 +146,24 @@ export interface JsonRpcMessage {
     handed to the provided callback  */
 export class JsonRpcStdioClient {
     private idCounter = 0
-    private pending = new Map<number, { resolve: (value: unknown) => void, reject: (error: Error) => void }>()
+    private pending = new Map<number | string, { resolve: (value: unknown) => void, reject: (error: Error) => void }>()
     constructor (
         private child: ChildProcessWithoutNullStreams,
         onMessage: (msg: JsonRpcMessage) => void
     ) {
+        /*  swallow asynchronous stdin write errors (e.g. EPIPE after
+            the process died), which would otherwise raise as uncaught
+            "error" events -- the failure surfaces via the process exit  */
+        child.stdin.on("error", () => { /* intentionally ignored */ })
         onLines(child.stdout, (line) => {
             let msg: JsonRpcMessage
             try { msg = JSON.parse(line) as JsonRpcMessage }
-            catch { return }
+            catch { return } /* intentionally ignored: non-JSON noise line */
             if (msg.method === undefined && msg.id !== undefined) {
                 /*  response to one of our requests  */
-                const entry = this.pending.get(msg.id as number)
+                const entry = this.pending.get(msg.id)
                 if (entry !== undefined) {
-                    this.pending.delete(msg.id as number)
+                    this.pending.delete(msg.id)
                     if (msg.error !== undefined)
                         entry.reject(new Error(msg.error.message))
                     else
