@@ -120,11 +120,17 @@ export const claudeDriver: HarnessDriver = {
             }
         })
 
-        /*  send a single turn and await its "result" event (when the
-            write to a dead process raises synchronously, the just
-            registered turn is taken back, so nobody later rejects an
-            unawaited promise)  */
+        /*  send a single turn and await its "result" event: a turn
+            started after the process died must fail fast here, because
+            Node surfaces a write on a destroyed stdin only through the
+            asynchronous "error" event (swallowed above) and the "close"
+            handler rejects only the turns already pending at close
+            time (when the write nevertheless raises synchronously, the
+            just registered turn is taken back, so nobody later rejects
+            an unawaited promise)  */
         const turn = (text: string): Promise<ClaudeEvent> => {
+            if (isBroken)
+                return Promise.reject(new Error("harness CLI worker process is broken"))
             const { promise, resolve, reject } = Promise.withResolvers<ClaudeEvent>()
             const entry = { resolve, reject }
             pending.push(entry)
