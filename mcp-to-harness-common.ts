@@ -117,11 +117,14 @@ export const raceDeadline = async <T>(
 }
 
 /*  terminate a child process: politely first, forcefully after a grace
-    period, and await its actual termination  */
+    period, and await its actual termination (a child whose spawn failed
+    has no pid and never emits "exit", so bail out early on a missing
+    pid and await "close", which fires after "exit" for a spawned child
+    and also fires for a spawn failure detected only later)  */
 export const killChild = async (child: ChildProcessWithoutNullStreams, graceMs = 3000): Promise<void> => {
-    if (child.exitCode !== null || child.signalCode !== null)
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null)
         return
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()))
+    const exited = new Promise<void>((resolve) => child.once("close", () => resolve()))
     child.kill("SIGTERM")
     const timer = setTimeout(() => child.kill("SIGKILL"), graceMs)
     timer.unref()
