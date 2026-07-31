@@ -77,6 +77,15 @@ export const onLines = (stream: Readable, onLine: (line: string) => void): void 
                 onLine(line)
         }
     })
+
+    /*  flush a trailing unterminated line once the stream ends (e.g. a
+        worker dying mid-write emits its last message without a newline)  */
+    stream.on("end", () => {
+        const line = buffer
+        buffer = ""
+        if (line.trim() !== "")
+            onLine(line)
+    })
 }
 
 /*  race a unit of work against a hard timeout and the caller's
