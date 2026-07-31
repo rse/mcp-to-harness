@@ -110,7 +110,7 @@ export const claudeDriver: HarnessDriver = {
         onLines(child.stdout, (line) => {
             let event: ClaudeEvent
             try { event = JSON.parse(line) as ClaudeEvent }
-            catch { return }
+            catch { return } /* intentionally ignored: non-JSON noise line */
             if (event.type === "result") {
                 const entry = pending.shift()
                 if (entry !== undefined)
@@ -148,6 +148,7 @@ export const claudeDriver: HarnessDriver = {
             return promise
         }
 
+        /*  expose the harness worker interface  */
         const worker: HarnessWorker = {
             broken: () => isBroken,
             async query (prompt: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {

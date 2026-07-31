@@ -175,6 +175,7 @@ export interface JsonRpcMessage {
     handed to the provided callback  */
 export class JsonRpcStdioClient {
     private idCounter = 0
+    private failure: Error | undefined
     private pending = new Map<number | string, { resolve: (value: unknown) => void, reject: (error: Error) => void }>()
     constructor (
         private child: ChildProcessWithoutNullStreams,
@@ -209,6 +210,11 @@ export class JsonRpcStdioClient {
         this.child.stdin.write(JSON.stringify(msg) + "\n")
     }
     request (method: string, params: object): Promise<unknown> {
+        /*  fail fast once the process is gone: a request registered
+            after "failAll" ran would otherwise linger unrejected until
+            the caller's external deadline  */
+        if (this.failure !== undefined)
+            return Promise.reject(this.failure)
         const id = ++this.idCounter
         const promise = new Promise<unknown>((resolve, reject) => {
             this.pending.set(id, { resolve, reject })
@@ -235,6 +241,7 @@ export class JsonRpcStdioClient {
         this.send({ jsonrpc: "2.0", id, error: { code, message } })
     }
     failAll (message: string): void {
+        this.failure = new Error(message)
         for (const entry of this.pending.values())
             entry.reject(new Error(message))
         this.pending.clear()

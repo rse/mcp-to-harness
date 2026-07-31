@@ -68,8 +68,14 @@ class MCPClient {
             harness errors, so their expected WARNING diagnostics do not
             clutter the test report  */
         this.child = spawn("node", [ cli, ...serverArgs ], { stdio: [ "pipe", "pipe", quiet ? "ignore" : "inherit" ] })
-        this.child.stdout?.on("data", (chunk: Buffer) => {
-            this.buffer += chunk.toString()
+
+        /*  swallow asynchronous stdin write errors (e.g. EPIPE after the
+            server process died) which would otherwise raise as uncaught
+            "error" events -- the failure surfaces via the "close" handler  */
+        this.child.stdin?.on("error", () => { /* intentionally ignored */ })
+        this.child.stdout?.setEncoding("utf8")
+        this.child.stdout?.on("data", (chunk: string) => {
+            this.buffer += chunk
             let idx: number
             while ((idx = this.buffer.indexOf("\n")) >= 0) {
                 const line = this.buffer.slice(0, idx)

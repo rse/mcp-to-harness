@@ -433,12 +433,12 @@ process.on("SIGTERM", shutdown)
 
 /*  main entry point  */
 const main = async (): Promise<void> => {
-    const transport = new StdioServerTransport()
-    await server.connect(transport)
-
     /*  when the MCP host closes the transport, take the
         pool workers down with it  */
     server.server.onclose = shutdown
+
+    const transport = new StdioServerTransport()
+    await server.connect(transport)
 }
 main().catch((error: unknown) => {
     const msg = error instanceof Error ? error.message : String(error)

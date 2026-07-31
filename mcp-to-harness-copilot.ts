@@ -136,14 +136,14 @@ export const copilotDriver: HarnessDriver = {
             and refuse all other server-initiated requests  */
         const rpc = new JsonRpcStdioClient(child, (msg) => {
             if (msg.method === "session/update") {
-                const params = msg.params as AcpUpdateParams
-                if (params.sessionId === activeSession
+                const params = msg.params as AcpUpdateParams | undefined
+                if (params !== undefined && params.sessionId === activeSession
                     && params.update?.sessionUpdate === "agent_message_chunk"
                     && params.update.content?.type === "text")
                     chunks.push(params.update.content.text ?? "")
             }
             else if (msg.id !== undefined && msg.method === "session/request_permission") {
-                const options = (msg.params as AcpPermissionParams).options ?? []
+                const options = (msg.params as AcpPermissionParams | undefined)?.options ?? []
                 const option  = options.find((o) => o.kind?.startsWith("reject"))
                 if (option !== undefined)
                     rpc.respond(msg.id, { outcome: { outcome: "selected", optionId: option.optionId } })
