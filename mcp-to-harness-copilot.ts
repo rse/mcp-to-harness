@@ -11,7 +11,7 @@ import fs                from "node:fs/promises"
 import { spawn }         from "node:child_process"
 
 /*  internal dependencies  */
-import { JsonRpcStdioClient, raceDeadline, killChild } from "./mcp-to-harness-common.js"
+import { JsonRpcStdioClient, onTail, raceDeadline, killChild } from "./mcp-to-harness-common.js"
 import type { HarnessConfig, HarnessDriver, HarnessWorker, Invocation } from "./mcp-to-harness-common.js"
 
 /*  the built-in tools of the Copilot CLI (names verified against 1.0.x by
@@ -128,11 +128,8 @@ export const copilotDriver: HarnessDriver = {
             process is still usable  */
         let activeSession: string | undefined
         let chunks:        string[] = []
-        let stderrTail = ""
-        let isBroken   = false
-        child.stderr.on("data", (chunk: Buffer) => {
-            stderrTail = (stderrTail + chunk.toString()).slice(-4096)
-        })
+        const stderrTail = onTail(child.stderr)
+        let isBroken = false
 
         /*  attach the JSON-RPC client: collect the streamed answer
             chunks, answer permission requests with the reject option,
@@ -162,7 +159,8 @@ export const copilotDriver: HarnessDriver = {
         })
         child.on("close", () => {
             isBroken = true
-            const detail = stderrTail.trim() !== "" ? `: ${stderrTail.trim()}` : ""
+            const tail   = stderrTail().trim()
+            const detail = tail !== "" ? `: ${tail}` : ""
             rpc.failAll(`harness CLI worker process exited unexpectedly${detail}`)
         })
 

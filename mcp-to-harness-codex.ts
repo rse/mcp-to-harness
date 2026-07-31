@@ -10,7 +10,7 @@ import fs                from "node:fs/promises"
 import { spawn }         from "node:child_process"
 
 /*  internal dependencies  */
-import { JsonRpcStdioClient, raceDeadline, killChild } from "./mcp-to-harness-common.js"
+import { JsonRpcStdioClient, onTail, raceDeadline, killChild } from "./mcp-to-harness-common.js"
 import type { HarnessConfig, HarnessDriver, HarnessWorker, Invocation } from "./mcp-to-harness-common.js"
 
 /*  the result of an MCP "tools/call" request (the minimal subset needed here)  */
@@ -99,12 +99,9 @@ export const codexDriver: HarnessDriver = {
         /*  track the worker state: a tail of the stderr output for
             diagnostics, whether the process is still usable, and the
             session rollout files persisted by the queries  */
-        let stderrTail = ""
-        let isBroken   = false
+        const stderrTail = onTail(child.stderr)
+        let isBroken = false
         const rolloutFiles: string[] = []
-        child.stderr.on("data", (chunk: Buffer) => {
-            stderrTail = (stderrTail + chunk.toString()).slice(-4096)
-        })
 
         /*  attach the JSON-RPC client, rejecting any server-initiated
             request and harvesting the rollout file path from the
@@ -125,7 +122,8 @@ export const codexDriver: HarnessDriver = {
         })
         child.on("close", () => {
             isBroken = true
-            const detail = stderrTail.trim() !== "" ? `: ${stderrTail.trim()}` : ""
+            const tail   = stderrTail().trim()
+            const detail = tail !== "" ? `: ${tail}` : ""
             rpc.failAll(`harness CLI worker process exited unexpectedly${detail}`)
         })
 

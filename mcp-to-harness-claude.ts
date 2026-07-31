@@ -8,7 +8,7 @@
 import { spawn }         from "node:child_process"
 
 /*  internal dependencies  */
-import { onLines, raceDeadline, killChild } from "./mcp-to-harness-common.js"
+import { onLines, onTail, raceDeadline, killChild } from "./mcp-to-harness-common.js"
 import type { HarnessConfig, HarnessDriver, HarnessWorker, Invocation } from "./mcp-to-harness-common.js"
 
 /*  the stream-json events of the Claude Code CLI (the minimal subset needed here)  */
@@ -85,12 +85,9 @@ export const claudeDriver: HarnessDriver = {
             "result" event, a tail of the stderr output for diagnostics,
             and whether the process is still usable  */
         const pending: { resolve: (event: ClaudeEvent) => void, reject: (error: Error) => void }[] = []
-        let stderrTail = ""
-        let isBroken   = false
-        let isVirgin   = true
-        child.stderr.on("data", (chunk: Buffer) => {
-            stderrTail = (stderrTail + chunk.toString()).slice(-4096)
-        })
+        const stderrTail = onTail(child.stderr)
+        let isBroken = false
+        let isVirgin = true
         child.stdin.on("error", () => {
             /*  intentionally ignored: an asynchronous write failure is
                 already surfaced through the "close" handler  */
@@ -102,7 +99,8 @@ export const claudeDriver: HarnessDriver = {
         })
         child.on("close", () => {
             isBroken = true
-            const detail = stderrTail.trim() !== "" ? `: ${stderrTail.trim()}` : ""
+            const tail   = stderrTail().trim()
+            const detail = tail !== "" ? `: ${tail}` : ""
             for (const entry of pending.splice(0))
                 entry.reject(new Error(`harness CLI worker process exited unexpectedly${detail}`))
         })

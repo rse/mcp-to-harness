@@ -88,6 +88,23 @@ export const onLines = (stream: Readable, onLine: (line: string) => void): void 
     })
 }
 
+/*  attach a bounded tail collector to a readable stream and return an
+    accessor for the collected tail: the "utf8" stream encoding decodes
+    multi-byte sequences correctly across chunk boundaries (a per-chunk
+    "toString" would mangle them into replacement characters) and the
+    truncation never leaves a severed surrogate pair behind  */
+export const onTail = (stream: Readable, maxLen = 4096): (() => string) => {
+    let tail = ""
+    stream.setEncoding("utf8")
+    stream.on("data", (chunk: string) => {
+        tail = (tail + chunk).slice(-maxLen)
+        const first = tail.charCodeAt(0)
+        if (first >= 0xDC00 && first <= 0xDFFF)
+            tail = tail.slice(1)
+    })
+    return () => tail
+}
+
 /*  race a unit of work against a hard timeout and the caller's
     cancellation signal: on either bound, the provided abort action is
     invoked (which is expected to kill the underlying process and thereby
