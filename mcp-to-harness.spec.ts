@@ -1,4 +1,4 @@
-/*!
+/*
 **  mcp-to-harness -- Bridge an MCP chat tool to an AI agent harness CLI
 **  Copyright (c) 2026 Dr. Ralf S. Engelschall <rse@engelschall.com>
 **  Distributed under MIT license <https://spdx.org/licenses/MIT.html>
