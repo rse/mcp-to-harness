@@ -6,6 +6,7 @@
 
 /*  built-in dependencies  */
 import path              from "node:path"
+import fs                from "node:fs/promises"
 import { spawn }         from "node:child_process"
 
 /*  internal dependencies  */
@@ -72,13 +73,15 @@ export const codexDriver: HarnessDriver = {
         while the requests stay isolated. The subcommand offers no
         "--ignore-user-config" or "--ephemeral" flags, so the user-level
         configuration is neutralized via "-c" overrides instead (empty
-        MCP server set, tool surfaces off) and -- as an accepted
-        deviation from the one-shot mode -- the session rollout files are
-        persisted under "$CODEX_HOME/sessions", exactly as with regular
-        interactive Codex use ("-c ephemeral=true" is verifiably ignored,
-        and relocating "$CODEX_HOME" would break the auth token refresh).
-        The per-call arguments provide the sandbox and approval
-        hardening, plus a proper system prompt channel
+        MCP server set, tool surfaces off) and the session rollout
+        files are persisted under "$CODEX_HOME/sessions", exactly as
+        with regular interactive Codex use ("-c ephemeral=true" is
+        verifiably ignored, and relocating "$CODEX_HOME" would break
+        the auth token refresh) -- so their paths are harvested from
+        the "session_configured" events and the files are removed again
+        on worker disposal, restoring the leave-no-trace semantics of
+        the one-shot mode. The per-call arguments provide the sandbox
+        and approval hardening, plus a proper system prompt channel
         ("base-instructions") which the "exec" subcommand lacks  */
     async spawnWorker (config: HarnessConfig, dir: string, env: Record<string, string>): Promise<HarnessWorker> {
         const args = [
@@ -94,18 +97,27 @@ export const codexDriver: HarnessDriver = {
         const child = spawn(config.command, args, { cwd: dir, env })
 
         /*  track the worker state: a tail of the stderr output for
-            diagnostics and whether the process is still usable  */
+            diagnostics, whether the process is still usable, and the
+            session rollout files persisted by the queries  */
         let stderrTail = ""
         let isBroken   = false
+        const rolloutFiles: string[] = []
         child.stderr.on("data", (chunk: Buffer) => {
             stderrTail = (stderrTail + chunk.toString()).slice(-4096)
         })
 
         /*  attach the JSON-RPC client, rejecting any server-initiated
-            request (the "codex/event" progress notifications are ignored)  */
+            request and harvesting the rollout file path from the
+            "session_configured" progress notification of each query
+            (all other "codex/event" progress notifications are ignored)  */
         const rpc = new JsonRpcStdioClient(child, (msg) => {
             if (msg.id !== undefined && msg.method !== undefined)
                 rpc.respondError(msg.id, -32601, "not supported by mcp-to-harness")
+            else if (msg.method === "codex/event") {
+                const event = (msg.params as { msg?: { type?: string, rollout_path?: string } })?.msg
+                if (event?.type === "session_configured" && typeof event.rollout_path === "string")
+                    rolloutFiles.push(event.rollout_path)
+            }
         })
         child.on("error", (error: Error) => {
             isBroken = true
@@ -170,6 +182,10 @@ export const codexDriver: HarnessDriver = {
             async dispose (): Promise<void> {
                 isBroken = true
                 await killChild(child)
+
+                /*  best-effort removal of the persisted session rollout files  */
+                await Promise.all(rolloutFiles.splice(0).map((file) =>
+                    fs.rm(file, { force: true }).catch(() => { /* intentionally ignored */ })))
             }
         }
         return worker
