@@ -53,7 +53,7 @@ interface AcpPermissionParams {
 export const copilotDriver: HarnessDriver = {
     /*  the per-harness authentication and configuration relocation
         environment variables passed through to the child harness CLI  */
-    envAllowlist: [ "GITHUB_TOKEN", "GH_TOKEN", "XDG_CONFIG_HOME" ],
+    envAllowlist: [ "GITHUB_TOKEN", "GH_TOKEN", "XDG_CONFIG_HOME", "COPILOT_HOME" ],
 
     /*  assemble the strictly non-interactive one-shot CLI invocation
         (flags verified against 1.0.x): non-interactive prompt mode with
