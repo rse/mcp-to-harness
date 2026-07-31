@@ -63,8 +63,11 @@ class MCPClient {
     private buffer = ""
     private pending = new Map<number, { resolve: (msg: RPCMessage) => void, reject: (err: Error) => void }>()
     private id = 0
-    constructor (serverArgs: string[]) {
-        this.child = spawn("node", [ cli, ...serverArgs ], { stdio: [ "pipe", "pipe", "inherit" ] })
+    constructor (serverArgs: string[], quiet = false) {
+        /*  drop the server's stderr for tests which deliberately provoke
+            harness errors, so their expected WARNING diagnostics do not
+            clutter the test report  */
+        this.child = spawn("node", [ cli, ...serverArgs ], { stdio: [ "pipe", "pipe", quiet ? "ignore" : "inherit" ] })
         this.child.stdout?.on("data", (chunk: Buffer) => {
             this.buffer += chunk.toString()
             let idx: number
@@ -263,7 +266,7 @@ describe("special cases", () => {
             "--mcp-tool",        "chat-error",
             "--harness",         "codex",
             "--harness-command", "mcp-to-harness-nonexistent-cli"
-        ])
+        ], true)
         try {
             await client.initialize()
             const result = await client.callTool("chat-error", promptMath)
@@ -284,7 +287,7 @@ describe("special cases", () => {
             "--mcp-tool",        "chat-timeout",
             "--harness",         "codex",
             "--harness-timeout", "2000"
-        ])
+        ], true)
         try {
             await client.initialize()
             const result = await client.callTool("chat-timeout", promptMath)
@@ -305,7 +308,7 @@ describe("special cases", () => {
             "--service",  "Test cancel",
             "--mcp-tool", "chat-cancel",
             "--harness",  "codex"
-        ])
+        ], true)
         try {
             await client.initialize()
             const id = client.callToolNoWait("chat-cancel", promptEssay)
