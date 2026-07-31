@@ -274,9 +274,27 @@ const poolParkIdle = (entry: PoolEntry): void => {
     signal  */
 const queryHarnessPooled = async (prompt: string, signal?: AbortSignal): Promise<string> => {
     /*  acquire a capacity slot (released slots are handed over to the
-        longest-waiting request first)  */
+        longest-waiting request first), abandoning the wait immediately
+        when the caller cancels the request while it is still queued  */
     if (poolSlotsInUse >= poolSize)
-        await new Promise<void>((resolve) => poolWaiters.push(resolve))
+        await new Promise<void>((resolve, reject) => {
+            if (signal?.aborted === true) {
+                reject(new Error("harness CLI execution was canceled"))
+                return
+            }
+            const waiter = (): void => {
+                signal?.removeEventListener("abort", onAbort)
+                resolve()
+            }
+            const onAbort = (): void => {
+                const idx = poolWaiters.indexOf(waiter)
+                if (idx >= 0)
+                    poolWaiters.splice(idx, 1)
+                reject(new Error("harness CLI execution was canceled"))
+            }
+            signal?.addEventListener("abort", onAbort, { once: true })
+            poolWaiters.push(waiter)
+        })
     else
         poolSlotsInUse++
     let entry: PoolEntry | undefined
