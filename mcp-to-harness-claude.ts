@@ -19,6 +19,14 @@ interface ClaudeEvent {
     result?:   string
 }
 
+/*  neutralize a leading "/" in a bridged user prompt by prepending a
+    newline, so the CLI answers it as chat instead of executing it as
+    a slash command (verified against 2.x: command detection triggers
+    on a raw leading "/" only, and a leading newline is semantically
+    negligible for the model)  */
+const neutralizePrompt = (prompt: string): string =>
+    prompt.startsWith("/") ? "\n" + prompt : prompt
+
 /*  the Anthropic Claude Code CLI driver  */
 export const claudeDriver: HarnessDriver = {
     /*  the per-harness authentication and configuration relocation
@@ -46,7 +54,7 @@ export const claudeDriver: HarnessDriver = {
             args.push("--model", config.model)
         if (config.prompt !== undefined)
             args.push("--system-prompt", config.prompt)
-        return { args, input: prompt }
+        return { args, input: neutralizePrompt(prompt) }
     },
 
     /*  spawn a persistent worker process (flags verified against 2.x):
@@ -153,7 +161,7 @@ export const claudeDriver: HarnessDriver = {
                             throw new Error("harness CLI failed to reset the conversation")
                     }
                     isVirgin = false
-                    const event = await turn(prompt)
+                    const event = await turn(neutralizePrompt(prompt))
                     if (event.subtype !== "success" || event.is_error === true)
                         throw new Error(`harness CLI failed (${event.subtype ?? "unknown"})`)
                     return event.result ?? ""
