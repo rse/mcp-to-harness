@@ -121,11 +121,11 @@ export const raceDeadline = async <T>(
 export const killChild = async (child: ChildProcessWithoutNullStreams, graceMs = 3000): Promise<void> => {
     if (child.exitCode !== null || child.signalCode !== null)
         return
-    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()))
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()))
     child.kill("SIGTERM")
     const timer = setTimeout(() => child.kill("SIGKILL"), graceMs)
     timer.unref()
-    await closed
+    await exited
     clearTimeout(timer)
 }
 
