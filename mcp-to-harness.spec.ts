@@ -165,6 +165,37 @@ for (const harness of [ "claude", "codex", "copilot" ] as const) {
     })
 }
 
+/*  the per-harness pooled-mode tests: a persistent worker process must
+    serve consecutive requests as isolated conversations (no context
+    carry-over from one request to the next)  */
+for (const harness of [ "claude", "codex", "copilot" ] as const) {
+    describe(`harness ${harness} (pooled)`, () => {
+        const itHarness  = missing(harness) ? it.skip : it
+        itHarness("pooled query with isolation", async () => {
+            const client = new MCPClient([
+                "--service",      `Test ${harness}`,
+                "--mcp-tool",     `chat-${harness}`,
+                "--harness",      harness,
+                "--harness-pool", "1"
+            ])
+            try {
+                await client.initialize()
+                const result1 = await client.callTool(`chat-${harness}`,
+                    "Remember the secret word BANANA. Then answer: what is 6*7? Answer with just the number.")
+                assert.notEqual(result1.isError, true)
+                assert.match(result1.content[0].text, /42/)
+                const result2 = await client.callTool(`chat-${harness}`,
+                    "What secret word did I ask you to remember earlier? Answer with just the word, or with exactly NONE when you do not know.")
+                assert.notEqual(result2.isError, true)
+                assert.doesNotMatch(result2.content[0].text, /BANANA/)
+            }
+            finally {
+                client.close()
+            }
+        }).timeout(300000).slow(120000)
+    })
+}
+
 /*  the remaining special-case tests  */
 describe("special cases", () => {
     /*  the model override test (Claude Code only, as its "haiku" model
@@ -187,6 +218,32 @@ describe("special cases", () => {
             client.close()
         }
     }).timeout(300000).slow(60000)
+
+    /*  the pooled parallelism test (Claude Code only, for run-time
+        reasons): two concurrent requests against a pool of two workers
+        must both succeed  */
+    itClaude("pooled parallel queries (claude)", async () => {
+        const client = new MCPClient([
+            "--service",      "Test claude",
+            "--mcp-tool",     "chat-claude",
+            "--harness",      "claude",
+            "--harness-pool", "2"
+        ])
+        try {
+            await client.initialize()
+            const [ result1, result2 ] = await Promise.all([
+                client.callTool("chat-claude", promptMath),
+                client.callTool("chat-claude", promptCapital)
+            ])
+            assert.notEqual(result1.isError, true)
+            assert.match(result1.content[0].text, /42/)
+            assert.notEqual(result2.isError, true)
+            assert.match(result2.content[0].text, /Paris/)
+        }
+        finally {
+            client.close()
+        }
+    }).timeout(300000).slow(120000)
 
     /*  the error path test: a nonexistent harness command must yield a clean,
         "ERROR: "-prefixed MCP error result (needs no harness installed at all)  */

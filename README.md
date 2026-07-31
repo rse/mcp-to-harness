@@ -18,22 +18,41 @@ Abstract
 This is a small Command-Line Interface (CLI) for conveniently bridging
 an MCP chat tool to a locally installed AI agent harness CLI, either
 Anthropic Claude Code CLI (`claude`), OpenAI Codex CLI (`codex`), or
-GitHub Copilot CLI (`copilot`). It runs as an MCP `stdio` transport
-based server and, once per incoming request, executes the harness CLI
-in a strictly one-shot, non-interactive, tool-less query mode as a
+GitHub Copilot CLI (`copilot`). This allows accessing foreign LLMs from
+within MCP host applications, like *Claude Code*, without any additional
+API keys: the harness authenticates via its own configured credentials
+(typically an existing AI service subscription).
+
+The **MCP-to-Harness** program runs as an MCP `stdio` transport based
+server and, once per incoming request, executes the harness CLI in
+a strictly one-shot, non-interactive, tool-less query mode as a
 chat-completion substitute.
 
-It allows accessing foreign LLMs from within MCP host applications,
-like *Claude Code*, without any additional API keys: the harness
-authenticates via its own configured credentials (typically an existing
-AI service subscription).
+Alternatively, when using the option `--harness-pool` with a value
+greater than 0, the harness CLI is kept running as a pool of persistent
+worker processes instead, which saves the process startup time on every
+request while still keeping the requests strictly isolated from each
+other:
+
+-   Claude Code runs in its streaming JSON mode with a conversation reset
+    (`/clear`) before every request
+-   Codex runs as its own MCP server (`codex mcp-server`) with a fresh
+    session per tool call
+-   Copilot runs as an Agent Client Protocol (ACP) server (`copilot
+    --acp`) with a fresh session per request and a relocated, throw-away
+    session store.
+
+Workers are spawned lazily on demand, reused when idle, retired after an
+idle period (see option `--harness-pool-idle`), recycled after at most
+100 served requests, and killed on a request timeout or cancellation (a
+poisoned conversation never leaks into the next request).
 
 > [!NOTE]
-> The agent harness CLI is contained as far as its command-line
-> options allow (temporary working directory, minimized environment,
-> disabled tools, disabled MCP servers, ignored user configurations), but
-> this is defense in depth, not a sealed box. Treat this bridge exactly
-> like a locally launched harness CLI.
+> The agent harness CLI is contained as far as its command-line options
+> allow (temporary working directory, minimized environment, disabled
+> tools, disabled MCP servers, ignored user configurations, relocated
+> session stores), but this is defense in depth, not a sealed box. Treat
+> this bridge exactly like a locally launched harness CLI.
 
 Installation
 ------------
@@ -51,20 +70,25 @@ Usage: mcp-to-harness [options]
 Bridge an MCP chat tool to an AI agent harness CLI
 
 Options:
-  -V, --version                   show program version information
-  -s, --service <service>         name of AI service (env: SERVICE)
-  -t, --mcp-tool <tool>           MCP tool name (env: MCP_TOOL)
-  -a, --harness <type>            AI agent harness type (choices: "claude",
-                                  "codex", "copilot", env: HARNESS)
-  -c, --harness-command <command> AI agent harness CLI command (env:
-                                  HARNESS_COMMAND)
-  -m, --harness-model <model>     AI agent harness model identifier (env:
-                                  HARNESS_MODEL)
-  -p, --harness-prompt <prompt>   AI agent harness system prompt (env:
-                                  HARNESS_PROMPT)
-  -T, --harness-timeout <ms>      AI agent harness execution timeout (default:
-                                  "300000", env: HARNESS_TIMEOUT)
-  -h, --help                      show this usage help
+  -V, --version                    show program version information
+  -s, --service <service>          name of AI service (env: SERVICE)
+  -t, --mcp-tool <tool>            MCP tool name (env: MCP_TOOL)
+  -a, --harness <type>             AI agent harness type (choices: "claude",
+                                   "codex", "copilot", env: HARNESS)
+  -c, --harness-command <command>  AI agent harness CLI command (env:
+                                   HARNESS_COMMAND)
+  -m, --harness-model <model>      AI agent harness model identifier (env:
+                                   HARNESS_MODEL)
+  -p, --harness-prompt <prompt>    AI agent harness system prompt (env:
+                                   HARNESS_PROMPT)
+  -T, --harness-timeout <ms>       AI agent harness execution timeout (default:
+                                   "300000", env: HARNESS_TIMEOUT)
+  -P, --harness-pool <n>           AI agent harness worker pool size (0 for
+                                   one-shot execution) (default: "0", env:
+                                   HARNESS_POOL)
+  -I, --harness-pool-idle <ms>     AI agent harness worker pool idle timeout
+                                   (default: "120000", env: HARNESS_POOL_IDLE)
+  -h, --help                       show this usage help
 
 Example:
   $ claude mcp add \

@@ -21,6 +21,13 @@ import { McpServer }            from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z }                    from "zod"
 
+/*  internal dependencies  */
+import { harnessTypes, envAllowlistCommon }                          from "./mcp-to-harness-common.js"
+import type { Harness, HarnessConfig, HarnessDriver, HarnessWorker } from "./mcp-to-harness-common.js"
+import { claudeDriver }                                              from "./mcp-to-harness-claude.js"
+import { codexDriver }                                               from "./mcp-to-harness-codex.js"
+import { copilotDriver }                                             from "./mcp-to-harness-copilot.js"
+
 /*  internal dependencies
     (read package.json at run-time relative to this module, so it
     resolves both when run as source and when run as compiled dist/ output)  */
@@ -41,10 +48,6 @@ const fatal = (msg: string): never => {
     process.stderr.write(`${pkg.name}: ERROR: ${msg}\n`)
     process.exit(1)
 }
-
-/*  the supported AI agent harness types  */
-const harnessTypes = [ "claude", "codex", "copilot" ] as const
-type Harness = (typeof harnessTypes)[number]
 
 /*  parse the command-line options (flags take precedence over environment variables)  */
 const program = new Command()
@@ -68,6 +71,10 @@ program
         .env("HARNESS_PROMPT"))
     .addOption(new Option("-T, --harness-timeout <ms>", "AI agent harness execution timeout")
         .env("HARNESS_TIMEOUT").default("300000"))
+    .addOption(new Option("-P, --harness-pool <n>", "AI agent harness worker pool size (0 for one-shot execution)")
+        .env("HARNESS_POOL").default("0"))
+    .addOption(new Option("-I, --harness-pool-idle <ms>", "AI agent harness worker pool idle timeout")
+        .env("HARNESS_POOL_IDLE").default("120000"))
     .addHelpText("after",
         "\n" +
         "Example:\n" +
@@ -93,175 +100,92 @@ const opts = program.opts<{
     harnessModel?:   string
     harnessPrompt?:  string
     harnessTimeout:  string
+    harnessPool:     string
+    harnessPoolIdle: string
 }>()
 
 /*  resolve the effective configuration and ensure all required values are present  */
-const SERVICE          = opts.service        ?? fatal("service required (use --service or $SERVICE)")
-const MCP_TOOL         = opts.mcpTool        ?? fatal("MCP tool required (use --mcp-tool or $MCP_TOOL)")
-const HARNESS          = opts.harness        ?? fatal("harness type required (use --harness or $HARNESS)")
-const HARNESS_COMMAND  = opts.harnessCommand ?? HARNESS
-const HARNESS_MODEL    = opts.harnessModel
-const HARNESS_PROMPT   = opts.harnessPrompt
-const HARNESS_TIMEOUT  = opts.harnessTimeout
+const SERVICE           = opts.service        ?? fatal("service required (use --service or $SERVICE)")
+const MCP_TOOL          = opts.mcpTool        ?? fatal("MCP tool required (use --mcp-tool or $MCP_TOOL)")
+const HARNESS           = opts.harness        ?? fatal("harness type required (use --harness or $HARNESS)")
+const HARNESS_COMMAND   = opts.harnessCommand ?? HARNESS
+const HARNESS_MODEL     = opts.harnessModel
+const HARNESS_PROMPT    = opts.harnessPrompt
+const HARNESS_TIMEOUT   = opts.harnessTimeout
+const HARNESS_POOL      = opts.harnessPool
+const HARNESS_POOL_IDLE = opts.harnessPoolIdle
 
 /*  parse and validate the execution timeout  */
 const timeoutMs = Number(HARNESS_TIMEOUT)
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
     fatal(`invalid harness timeout "${HARNESS_TIMEOUT}" (use a positive integer of milliseconds)`)
 
-/*  the minimal set of parent environment variables passed through to the
-    child harness CLI: the executable search path and home directory, the
-    user identity (macOS keychain lookups of Claude Code require it), the
-    terminal type, the standard HTTP(S) proxy variables (the "extendEnv:
-    false" isolation would otherwise cut off network access from behind a
-    corporate proxy), plus per-harness authentication and configuration
-    relocation variables; every other variable in the parent environment
-    is deliberately withheld  */
-const envAllowlistCommon = [
-    "PATH", "HOME", "USER", "LOGNAME", "TERM",
-    "HTTP_PROXY",  "HTTPS_PROXY",  "NO_PROXY",  "ALL_PROXY",
-    "http_proxy",  "https_proxy",  "no_proxy",  "all_proxy"
-]
-const envAllowlistHarness: Record<Harness, string[]> = {
-    claude:  [ "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME" ],
-    codex:   [ "CODEX_HOME",        "XDG_CONFIG_HOME" ],
-    copilot: [ "GITHUB_TOKEN",      "GH_TOKEN",          "XDG_CONFIG_HOME" ]
+/*  parse and validate the worker pool size and idle timeout  */
+const poolSize = Number(HARNESS_POOL)
+if (!Number.isSafeInteger(poolSize) || poolSize < 0)
+    fatal(`invalid harness pool size "${HARNESS_POOL}" (use a non-negative integer)`)
+const poolIdleMs = Number(HARNESS_POOL_IDLE)
+if (!Number.isSafeInteger(poolIdleMs) || poolIdleMs <= 0)
+    fatal(`invalid harness pool idle timeout "${HARNESS_POOL_IDLE}" (use a positive integer of milliseconds)`)
+
+/*  the maximum number of requests served by a single pool worker before
+    it is recycled (insurance against slow resource accumulation inside
+    a long-lived harness CLI process)  */
+const poolWorkerMaxUses = 100
+
+/*  the per-harness driver  */
+const drivers: Record<Harness, HarnessDriver> = {
+    claude:  claudeDriver,
+    codex:   codexDriver,
+    copilot: copilotDriver
+}
+const driver = drivers[HARNESS]
+
+/*  the effective harness configuration handed to the driver  */
+const config: HarnessConfig = {
+    command:       HARNESS_COMMAND,
+    model:         HARNESS_MODEL,
+    prompt:        HARNESS_PROMPT,
+    bridgeName:    pkg.name,
+    bridgeVersion: pkg.version
 }
 
-/*  the harness-specific CLI invocation  */
-interface Invocation {
-    args:    string[]
-    input:   string
-    output?: string
+/*  build a minimized child environment from the explicit allowlist
+    (never the inherited parent environment) and force headless mode so
+    that -- when the child harness has hooks installed which emit a
+    session banner -- those hooks can suppress it instead of leaking it
+    into the captured answer  */
+const buildEnv = (): Record<string, string> => {
+    const env: Record<string, string> = { ASE_HEADLESS: "true" }
+    for (const key of [ ...envAllowlistCommon, ...driver.envAllowlist ])
+        if (process.env[key] !== undefined)
+            env[key] = process.env[key]
+    return env
 }
 
-/*  assemble the harness-specific, strictly non-interactive CLI invocation:
-    every harness runs as a one-shot query, rooted in a throw-away temporary
-    working directory, with its built-in tool surfaces (shell execution,
-    file editing, web access, MCP servers) switched off as far as the
-    respective CLI allows -- the harness is used purely as a
-    chat-completion substitute, not as an autonomous agent  */
-const assembleInvocation = (harness: Harness, prompt: string, dir: string): Invocation => {
-    if (harness === "claude") {
-        /*  Anthropic Claude Code CLI (flags verified against 2.x):
-            print mode with plain text output, all customizations disabled
-            ("--safe-mode": no hooks, plugins, MCP servers, CLAUDE.md, or
-            skills), all built-in tools disabled ("--tools" with an empty
-            list), MCP servers restricted to the (empty) explicit
-            configuration (prevents the child from re-entering this very
-            bridge through a user-scope MCP registration, which would
-            recurse indefinitely), and no session persisted to disk. The
-            prompt is passed on stdin, so an arbitrarily long prompt
-            neither overflows the argument list (E2BIG) nor becomes
-            visible in the process table  */
-        const args = [
-            "--print", "--output-format", "text",
-            "--safe-mode", "--tools", "",
-            "--strict-mcp-config", "--no-session-persistence"
-        ]
-        if (HARNESS_MODEL !== undefined)
-            args.push("--model", HARNESS_MODEL)
-        if (HARNESS_PROMPT !== undefined)
-            args.push("--system-prompt", HARNESS_PROMPT)
-        return { args, input: prompt }
-    }
-    else if (harness === "codex") {
-        /*  OpenAI Codex CLI (flags verified against 0.14x): skip the
-            Git-repository requirement (the cwd is a bare temp directory),
-            confine the sandbox to read-only, disable ANSI coloring, avoid
-            persisting a session, ignore the user-level configuration and
-            execpolicy rules (prevents the child from re-entering this
-            very bridge through a user-scope MCP registration and keeps
-            foreign MCP tools out of the query -- authentication still
-            resolves from "$CODEX_HOME"), switch off the built-in tool
-            surfaces via feature flags (shell execution, web search, image
-            generation, multi-agent spawning, hosted apps MCP), root the
-            agent in the temp directory, and capture just the final agent
-            message in a dedicated output file rather than the noisy event
-            transcript on stdout. The prompt is passed on stdin ("-"), the
-            optional system prompt is prepended as a preamble (the CLI
-            offers no separate system prompt channel)  */
-        const output = path.join(dir, "answer.txt")
-        const args = [
-            "exec",
-            "--skip-git-repo-check",
-            "--sandbox",             "read-only",
-            "--color",               "never",
-            "--ephemeral",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "-c",                    "features.shell_tool=false",
-            "-c",                    "web_search=disabled",
-            "-c",                    "features.image_generation=false",
-            "-c",                    "features.multi_agent=false",
-            "-c",                    "features.multi_agent_v2=false",
-            "-c",                    "features.apps=false",
-            "-C",                    dir,
-            "-o",                    output
-        ]
-        if (HARNESS_MODEL !== undefined)
-            args.push("--model", HARNESS_MODEL)
-        args.push("-")
-        const input = HARNESS_PROMPT !== undefined ? `${HARNESS_PROMPT}\n\n${prompt}` : prompt
-        return { args, input, output }
-    }
-    else if (harness === "copilot") {
-        /*  GitHub Copilot CLI (flags verified against 1.0.x):
-            non-interactive prompt mode with response-only output, no
-            coloring, an empty available-tools list (strips all tools from
-            the model), built-in MCP servers disabled, no custom
-            instructions loaded, no interactive questions asked, no
-            automatic self-update, no session export, and logging switched
-            off. The CLI offers neither a stdin prompt channel nor a
-            separate system prompt channel, so the prompt travels as an
-            argument and the optional system prompt is prepended as a
-            preamble  */
-        const promptText = HARNESS_PROMPT !== undefined ? `${HARNESS_PROMPT}\n\n${prompt}` : prompt
-        const args = [
-            "--prompt", promptText,
-            "--silent",
-            "--no-color",
-            "--available-tools=",
-            "--disable-builtin-mcps",
-            "--no-custom-instructions",
-            "--no-ask-user",
-            "--no-auto-update",
-            "--no-remote-export",
-            "--log-level", "none"
-        ]
-        if (HARNESS_MODEL !== undefined)
-            args.push("--model", HARNESS_MODEL)
-        return { args, input: "" }
-    }
-    else {
-        /*  exhaustiveness guard for a future harness type  */
-        const unhandled: never = harness
-        throw new Error(`unsupported harness type "${String(unhandled)}"`)
-    }
-}
+/*  create a throw-away working directory so the harness CLI cannot
+    read or write anything relevant in the current project  */
+const makeWorkDir = (): Promise<string> =>
+    fs.mkdtemp(path.join(os.tmpdir(), `${pkg.name}-`))
 
-/*  query the AI agent harness CLI in a strictly non-interactive fashion and
-    return its final answer: the CLI is rooted in a throw-away temporary
-    working directory, runs with a minimized environment assembled from an
-    explicit allowlist, and is bounded by a hard timeout and the caller's
-    cancellation signal  */
-const queryHarness = async (prompt: string, signal?: AbortSignal): Promise<string> => {
-    /*  create a throw-away working directory so the harness CLI cannot
-        read or write anything relevant in the current project  */
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `${pkg.name}-`))
+/*  best-effort removal of a throw-away working directory,
+    surfacing (but not propagating) a removal failure on stderr  */
+const removeWorkDir = (dir: string): Promise<void> =>
+    fs.rm(dir, { recursive: true, force: true }).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        process.stderr.write(`${pkg.name}: WARNING: failed to remove temporary directory ${dir}: ${message}\n`)
+    })
+
+/*  query the AI agent harness CLI in a strictly non-interactive,
+    one-shot fashion and return its final answer: the CLI is rooted in a
+    throw-away temporary working directory, runs with a minimized
+    environment assembled from an explicit allowlist, and is bounded by a
+    hard timeout and the caller's cancellation signal  */
+const queryHarnessOneShot = async (prompt: string, signal?: AbortSignal): Promise<string> => {
+    const dir = await makeWorkDir()
     try {
         /*  assemble the harness-specific CLI invocation  */
-        const invocation = assembleInvocation(HARNESS, prompt, dir)
-
-        /*  build a minimized child environment from the explicit
-            allowlist (never the inherited parent environment) and force
-            headless mode so that -- when the child harness has hooks
-            installed which emit a session banner -- those hooks can
-            suppress it instead of leaking it into the captured answer  */
-        const env: Record<string, string> = { ASE_HEADLESS: "true" }
-        for (const key of [ ...envAllowlistCommon, ...envAllowlistHarness[HARNESS] ])
-            if (process.env[key] !== undefined)
-                env[key] = process.env[key]
+        const invocation = driver.assembleInvocation(config, prompt, dir)
 
         /*  run the harness CLI with the minimized environment, the prompt
             piped on stdin (where supported), a hard timeout, and the
@@ -269,7 +193,7 @@ const queryHarness = async (prompt: string, signal?: AbortSignal): Promise<strin
             a non-zero exit so we can surface a clean MCP error  */
         const result = await execa(HARNESS_COMMAND, invocation.args, {
             cwd:          dir,
-            env,
+            env:          buildEnv(),
             extendEnv:    false,
             input:        invocation.input,
             timeout:      timeoutMs,
@@ -295,19 +219,137 @@ const queryHarness = async (prompt: string, signal?: AbortSignal): Promise<strin
             answer = await fs.readFile(invocation.output, "utf8").catch(() => "")
         if (answer.trim() === "")
             answer = result.stdout
-        answer = answer.trim()
-        if (answer === "")
-            throw new Error("harness CLI returned an empty answer")
         return answer
     }
     finally {
-        /*  best-effort cleanup of the throw-away working directory,
-            surfacing (but not propagating) a removal failure on stderr  */
-        await fs.rm(dir, { recursive: true, force: true }).catch((err: unknown) => {
-            const message = err instanceof Error ? err.message : String(err)
-            process.stderr.write(`${pkg.name}: WARNING: failed to remove temporary directory ${dir}: ${message}\n`)
-        })
+        await removeWorkDir(dir)
     }
+}
+
+/*  the worker pool for persistent harness CLI processes: workers are
+    spawned lazily on demand (so the worst case equals the one-shot
+    behavior), reused when idle, retired after an idle period, after a
+    maximum number of uses, or whenever they broke -- a request timeout
+    or cancellation simply kills the worker, since the pool respawns
+    lazily and a poisoned conversation must never leak into the next
+    request  */
+interface PoolEntry {
+    worker:    HarnessWorker
+    dir:       string
+    busy:      boolean
+    uses:      number
+    idleTimer: ReturnType<typeof setTimeout> | null
+}
+const pool: PoolEntry[] = []
+let poolSlotsInUse = 0
+const poolWaiters: (() => void)[] = []
+
+/*  retire a pool worker: remove it from the pool, terminate its process
+    and remove its working directory  */
+const poolRetire = async (entry: PoolEntry): Promise<void> => {
+    const idx = pool.indexOf(entry)
+    if (idx >= 0)
+        pool.splice(idx, 1)
+    if (entry.idleTimer !== null)
+        clearTimeout(entry.idleTimer)
+    await entry.worker.dispose().catch(() => { /* intentionally ignored */ })
+    await removeWorkDir(entry.dir)
+}
+
+/*  park a pool worker as idle and arm its idle retirement timer  */
+const poolParkIdle = (entry: PoolEntry): void => {
+    entry.busy = false
+    entry.idleTimer = setTimeout(() => {
+        if (!entry.busy)
+            poolRetire(entry).catch(() => { /* intentionally ignored */ })
+    }, poolIdleMs)
+    entry.idleTimer.unref()
+}
+
+/*  query the AI agent harness CLI through a pooled persistent worker
+    process and return its final answer: a free capacity slot is awaited
+    (bounding the number of concurrent workers), then an idle worker is
+    reused or a new one spawned, and the request runs as an isolated
+    conversation bounded by a hard timeout and the caller's cancellation
+    signal  */
+const queryHarnessPooled = async (prompt: string, signal?: AbortSignal): Promise<string> => {
+    /*  acquire a capacity slot (released slots are handed over to the
+        longest-waiting request first)  */
+    if (poolSlotsInUse >= poolSize)
+        await new Promise<void>((resolve) => poolWaiters.push(resolve))
+    else
+        poolSlotsInUse++
+    let entry: PoolEntry | undefined
+    try {
+        /*  reuse an idle worker, retiring the ones found broken  */
+        for (;;) {
+            entry = pool.find((e) => !e.busy)
+            if (entry === undefined)
+                break
+            entry.busy = true
+            if (entry.idleTimer !== null) {
+                clearTimeout(entry.idleTimer)
+                entry.idleTimer = null
+            }
+            if (!entry.worker.broken())
+                break
+            await poolRetire(entry)
+            entry = undefined
+        }
+
+        /*  or else spawn a fresh worker on demand  */
+        if (entry === undefined) {
+            const dir = await makeWorkDir()
+            let worker: HarnessWorker
+            try {
+                worker = await driver.spawnWorker(config, dir, buildEnv())
+            }
+            catch (err: unknown) {
+                await removeWorkDir(dir)
+                throw err
+            }
+            entry = { worker, dir, busy: true, uses: 0, idleTimer: null }
+            pool.push(entry)
+        }
+
+        /*  perform the isolated request  */
+        const answer = await entry.worker.query(prompt, timeoutMs, signal)
+        entry.uses++
+
+        /*  recycle exhausted or broken workers, park the healthy ones  */
+        if (entry.worker.broken() || entry.uses >= poolWorkerMaxUses)
+            await poolRetire(entry)
+        else
+            poolParkIdle(entry)
+        entry = undefined
+        return answer
+    }
+    catch (err: unknown) {
+        /*  a failed request never returns its worker to the pool  */
+        if (entry !== undefined)
+            await poolRetire(entry)
+        throw err
+    }
+    finally {
+        /*  release the capacity slot  */
+        const next = poolWaiters.shift()
+        if (next !== undefined)
+            next()
+        else
+            poolSlotsInUse--
+    }
+}
+
+/*  query the AI agent harness CLI (one-shot or pooled) and return its
+    final, whitespace-trimmed, non-empty answer  */
+const queryHarness = async (prompt: string, signal?: AbortSignal): Promise<string> => {
+    let answer = poolSize > 0 ?
+        await queryHarnessPooled(prompt, signal) :
+        await queryHarnessOneShot(prompt, signal)
+    answer = answer.trim()
+    if (answer === "")
+        throw new Error("harness CLI returned an empty answer")
+    return answer
 }
 
 /*  establish the MCP server  */
@@ -353,10 +395,27 @@ server.registerTool(
     }
 )
 
+/*  gracefully shut down: retire all pool workers and terminate  */
+let shuttingDown = false
+const shutdown = (): void => {
+    if (shuttingDown)
+        return
+    shuttingDown = true
+    Promise.all(pool.slice().map((entry) => poolRetire(entry)))
+        .catch(() => { /* intentionally ignored */ })
+        .finally(() => process.exit(0))
+}
+process.on("SIGINT",  shutdown)
+process.on("SIGTERM", shutdown)
+
 /*  main entry point  */
 const main = async (): Promise<void> => {
     const transport = new StdioServerTransport()
     await server.connect(transport)
+
+    /*  when the MCP host closes the transport, take the
+        pool workers down with it  */
+    server.server.onclose = shutdown
 }
 main().catch((error: unknown) => {
     const msg = error instanceof Error ? error.message : String(error)

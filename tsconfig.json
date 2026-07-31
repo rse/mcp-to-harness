@@ -14,6 +14,12 @@
       "declaration":       false,
       "sourceMap":         false
     },
-    "include": [ "mcp-to-harness.ts" ],
+    "include": [
+      "mcp-to-harness.ts",
+      "mcp-to-harness-common.ts",
+      "mcp-to-harness-claude.ts",
+      "mcp-to-harness-codex.ts",
+      "mcp-to-harness-copilot.ts"
+    ],
     "exclude": [ "node_modules", "dist" ]
 }
