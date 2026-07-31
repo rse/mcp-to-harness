@@ -29,7 +29,7 @@ authenticates via its own configured credentials (typically an existing
 AI service subscription).
 
 > [!NOTE]
-> The agwent harness CLI is contained as far as its command-line
+> The agent harness CLI is contained as far as its command-line
 > options allow (temporary working directory, minimized environment,
 > disabled tools, disabled MCP servers, ignored user configurations), but
 > this is defense in depth, not a sealed box. Treat this bridge exactly
