@@ -205,12 +205,18 @@ export const copilotDriver: HarnessDriver = {
                     }) as AcpPromptResult
                     activeSession = undefined
 
+                    /*  any non-successful stop reason (e.g. "max_tokens",
+                        "max_turn_requests", "refusal", or "cancelled") is a
+                        hard failure, even when partial answer text was
+                        already streamed -- a truncated or refused answer
+                        must not be returned as if it were complete  */
+                    if (result.stopReason !== "end_turn")
+                        throw new Error(`harness CLI failed (stop reason: ${result.stopReason ?? "unknown"})`)
+
                     /*  strip the deterministic informational prefix  */
                     let answer = chunks.join("")
                     while (answer.startsWith(copilotInfoPrefix))
                         answer = answer.slice(copilotInfoPrefix.length)
-                    if (answer.trim() === "" && result.stopReason !== "end_turn")
-                        throw new Error(`harness CLI failed (stop reason: ${result.stopReason ?? "unknown"})`)
                     return answer
                 })()
                 return raceDeadline(work, timeoutMs, signal, () => {
