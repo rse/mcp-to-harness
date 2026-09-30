@@ -100,7 +100,7 @@ Example:
       --service       "OpenAI Codex" \
       --mcp-tool      chat-openai-codex \
       --harness       codex \
-      --harness-model gpt-5
+      --harness-model gpt-6
 ```
 
 License
