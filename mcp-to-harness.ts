@@ -87,7 +87,7 @@ program
         "      --service       \"OpenAI Codex\" \\\n" +
         "      --mcp-tool      chat-openai-codex \\\n" +
         "      --harness       codex \\\n" +
-        "      --harness-model gpt-6\n"
+        "      --harness-model gpt-6-astra\n"
     )
     .allowExcessArguments(false)
     .parse()
