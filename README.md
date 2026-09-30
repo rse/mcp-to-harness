@@ -96,7 +96,7 @@ Example:
     --transport stdio \
     -- \
     chat-openai-codex \
-    npx mcp-to-harness \
+    npx -y mcp-to-harness \
       --service       "OpenAI Codex" \
       --mcp-tool      chat-openai-codex \
       --harness       codex \
