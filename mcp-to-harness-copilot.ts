@@ -33,7 +33,7 @@ const copilotBuiltinTools = [
     ACP agent message stream, prefixed to the answer of every turn, so
     this deterministic prefix has to be stripped (the tool names are
     reported in alphabetical order)  */
-const copilotInfoPrefix = `Info: Disabled tools: ${[ ...copilotBuiltinTools ].sort().join(", ")}`
+const copilotInfoPrefix = `Info: Disabled tools: ${copilotBuiltinTools.toSorted().join(", ")}`
 
 /*  the ACP messages (the minimal subset needed here)  */
 interface AcpSessionNew    { sessionId?: string }
@@ -105,8 +105,8 @@ export const copilotDriver: HarnessDriver = {
         const homeSource = process.env["COPILOT_HOME"] ?? path.join(os.homedir(), ".copilot")
         await fs.copyFile(path.join(homeSource, "config.json"), path.join(home, "config.json"))
             .catch(() => { /* intentionally ignored */ })
-        env = { ...env, COPILOT_HOME: home }
 
+        /*  spawn the Copilot CLI as an ACP JSON-RPC stdio server  */
         const args = [
             "--acp",
             "--no-color",
@@ -120,7 +120,7 @@ export const copilotDriver: HarnessDriver = {
         ]
         if (config.model !== undefined)
             args.push("--model", config.model)
-        const child = spawn(config.command, args, { cwd: dir, env })
+        const child = spawn(config.command, args, { cwd: dir, env: { ...env, COPILOT_HOME: home } })
 
         /*  track the worker state: the currently prompted ACP session
             (whose agent message chunks are collected as the answer), a
@@ -143,10 +143,10 @@ export const copilotDriver: HarnessDriver = {
                     chunks.push(params.update.content.text ?? "")
             }
             else if (msg.id !== undefined && msg.method === "session/request_permission") {
-                const options = (msg.params as AcpPermissionParams | undefined)?.options ?? []
-                const option  = options.find((o) => o.kind?.startsWith("reject"))
-                if (option !== undefined)
-                    rpc.respond(msg.id, { outcome: { outcome: "selected", optionId: option.optionId } })
+                const options  = (msg.params as AcpPermissionParams | undefined)?.options ?? []
+                const optionId = options.find((o) => o.kind?.startsWith("reject") && o.optionId !== undefined)?.optionId
+                if (optionId !== undefined)
+                    rpc.respond(msg.id, { outcome: { outcome: "selected", optionId } })
                 else
                     rpc.respond(msg.id, { outcome: { outcome: "cancelled" } })
             }
@@ -180,6 +180,7 @@ export const copilotDriver: HarnessDriver = {
             throw err
         })
 
+        /*  expose the harness worker interface  */
         const worker: HarnessWorker = {
             broken: () => isBroken,
             async query (prompt: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {

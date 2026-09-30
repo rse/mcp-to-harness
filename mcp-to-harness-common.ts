@@ -68,14 +68,11 @@ export const onLines = (stream: Readable, onLine: (line: string) => void): void 
     let buffer = ""
     stream.setEncoding("utf8")
     stream.on("data", (chunk: string) => {
-        buffer += chunk
-        let idx: number
-        while ((idx = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, idx)
-            buffer = buffer.slice(idx + 1)
+        const lines = (buffer + chunk).split("\n")
+        buffer = lines.pop() ?? ""
+        for (const line of lines)
             if (line.trim() !== "")
                 onLine(line)
-        }
     })
 
     /*  flush a trailing unterminated line once the stream ends (e.g. a
@@ -177,6 +174,8 @@ export class JsonRpcStdioClient {
     private idCounter = 0
     private failure: Error | undefined
     private pending = new Map<number | string, { resolve: (value: unknown) => void, reject: (error: Error) => void }>()
+
+    /*  attach the client to the stdio streams of a child process  */
     constructor (
         private child: ChildProcessWithoutNullStreams,
         onMessage: (msg: JsonRpcMessage) => void
@@ -186,9 +185,11 @@ export class JsonRpcStdioClient {
             "error" events -- the failure surfaces via the process exit  */
         child.stdin.on("error", () => { /* intentionally ignored */ })
         onLines(child.stdout, (line) => {
-            let msg: JsonRpcMessage
-            try { msg = JSON.parse(line) as JsonRpcMessage }
+            let msg: JsonRpcMessage | null
+            try { msg = JSON.parse(line) as JsonRpcMessage | null }
             catch { return } /* intentionally ignored: non-JSON noise line */
+            if (typeof msg !== "object" || msg === null)
+                return /* intentionally ignored: non-object JSON line */
             if (msg.method === undefined && msg.id !== undefined) {
                 /*  response to one of our requests  */
                 const entry = this.pending.get(msg.id)
@@ -206,9 +207,13 @@ export class JsonRpcStdioClient {
             }
         })
     }
-    private send (msg: object): void {
+
+    /*  send a single message as a newline-delimited JSON line  */
+    private send (msg: JsonRpcMessage): void {
         this.child.stdin.write(JSON.stringify(msg) + "\n")
     }
+
+    /*  send a request and await its correlated response  */
     request (method: string, params: object): Promise<unknown> {
         /*  fail fast once the process is gone: a request registered
             after "failAll" ran would otherwise linger unrejected until
@@ -216,9 +221,8 @@ export class JsonRpcStdioClient {
         if (this.failure !== undefined)
             return Promise.reject(this.failure)
         const id = ++this.idCounter
-        const promise = new Promise<unknown>((resolve, reject) => {
-            this.pending.set(id, { resolve, reject })
-        })
+        const { promise, resolve, reject } = Promise.withResolvers<unknown>()
+        this.pending.set(id, { resolve, reject })
         try {
             this.send({ jsonrpc: "2.0", id, method, params })
         }
@@ -231,19 +235,28 @@ export class JsonRpcStdioClient {
         }
         return promise
     }
+
+    /*  send a notification (a message without a response)  */
     notify (method: string, params: object): void {
         this.send({ jsonrpc: "2.0", method, params })
     }
+
+    /*  answer a server-initiated request with a result  */
     respond (id: number | string, result: object): void {
         this.send({ jsonrpc: "2.0", id, result })
     }
+
+    /*  answer a server-initiated request with an error  */
     respondError (id: number | string, code: number, message: string): void {
         this.send({ jsonrpc: "2.0", id, error: { code, message } })
     }
+
+    /*  reject all pending and all future requests with a failure
+        (the first failure is kept, as it carries the actual cause)  */
     failAll (message: string): void {
-        this.failure = new Error(message)
+        this.failure ??= new Error(message)
         for (const entry of this.pending.values())
-            entry.reject(new Error(message))
+            entry.reject(this.failure)
         this.pending.clear()
     }
 }

@@ -17,17 +17,26 @@ import assert                   from "node:assert/strict"
 import { spawn, execSync }      from "node:child_process"
 import type { ChildProcess }    from "node:child_process"
 import { fileURLToPath }        from "node:url"
+import { setTimeout as delay }  from "node:timers/promises"
 
 /*  external dependencies  */
-import { describe, it }         from "mocha"
+import { describe, it, after }  from "mocha"
 
 /*  the compiled CLI under test  */
 const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist", "mcp-to-harness.js")
 
 /*  JSON-RPC / MCP wire types (just the minimal subset needed here)  */
-interface RPCMessage { jsonrpc: string, id?: number, result?: unknown }
+interface RPCMessage { jsonrpc: string, id?: number, result?: unknown, error?: { code: number, message: string } }
 interface ToolResult { isError?: boolean, content: { type: string, text: string }[] }
 interface ToolsList  { tools: { name: string }[] }
+
+/*  all spawned clients, killed after the test run even when a
+    timed-out test never reached its own cleanup  */
+const clients = new Set<MCPClient>()
+after(() => {
+    for (const client of clients)
+        client.close()
+})
 
 /*  check whether a harness CLI is installed  */
 const missing = (command: string): boolean => {
@@ -53,10 +62,6 @@ const processCount = (pattern: string): number => {
     }
 }
 
-/*  sleep for a number of milliseconds  */
-const delay = (ms: number): Promise<void> =>
-    new Promise((resolve) => setTimeout(resolve, ms))
-
 /*  minimal raw JSON-RPC MCP stdio client around a spawned server process  */
 class MCPClient {
     private child: ChildProcess
@@ -68,6 +73,7 @@ class MCPClient {
             harness errors, so their expected WARNING diagnostics do not
             clutter the test report  */
         this.child = spawn("node", [ cli, ...serverArgs ], { stdio: [ "pipe", "pipe", quiet ? "ignore" : "inherit" ] })
+        clients.add(this)
 
         /*  swallow asynchronous stdin write errors (e.g. EPIPE after the
             server process died) which would otherwise raise as uncaught
@@ -89,7 +95,10 @@ class MCPClient {
                     const entry = this.pending.get(msg.id)
                     if (entry !== undefined) {
                         this.pending.delete(msg.id)
-                        entry.resolve(msg)
+                        if (msg.error !== undefined)
+                            entry.reject(new Error(`MCP error ${msg.error.code}: ${msg.error.message}`))
+                        else
+                            entry.resolve(msg)
                     }
                 }
             }
@@ -104,6 +113,8 @@ class MCPClient {
         this.child.stdin?.write(JSON.stringify(msg) + "\n")
     }
     request (method: string, params: object): Promise<RPCMessage> {
+        if (this.child.exitCode !== null || this.child.signalCode !== null)
+            return Promise.reject(new Error("MCP server process already exited"))
         const id = ++this.id
         const promise = new Promise<RPCMessage>((resolve, reject) => {
             this.pending.set(id, { resolve, reject })
@@ -136,6 +147,7 @@ class MCPClient {
     }
     close (): void {
         this.child.kill()
+        clients.delete(this)
     }
 }
 
@@ -146,7 +158,9 @@ const promptCapital = "What is the capital of France?"
 const promptSystem  = "You must always answer with exactly the single word BANANA."
 const promptEssay   = "Write a detailed 1000 word essay about the history of computing."
 
-/*  the per-harness tests: plain query and system prompt round-trip  */
+/*  the per-harness tests: plain query, system prompt, and pooled-mode
+    round-trip (a persistent worker must serve consecutive requests as
+    isolated conversations without context carry-over)  */
 for (const harness of [ "claude", "codex", "copilot" ] as const) {
     describe(`harness ${harness}`, () => {
         const itHarness  = missing(harness) ? it.skip : it
@@ -181,22 +195,8 @@ for (const harness of [ "claude", "codex", "copilot" ] as const) {
                 client.close()
             }
         }).timeout(300000).slow(60000)
-    })
-}
-
-/*  the per-harness pooled-mode tests: a persistent worker process must
-    serve consecutive requests as isolated conversations (no context
-    carry-over from one request to the next)  */
-for (const harness of [ "claude", "codex", "copilot" ] as const) {
-    describe(`harness ${harness} (pooled)`, () => {
-        const itHarness  = missing(harness) ? it.skip : it
         itHarness("pooled query with isolation", async () => {
-            const client = new MCPClient([
-                "--service",      `Test ${harness}`,
-                "--mcp-tool",     `chat-${harness}`,
-                "--harness",      harness,
-                "--harness-pool", "1"
-            ])
+            const client = new MCPClient([ ...serverArgs, "--harness-pool", "1" ])
             try {
                 await client.initialize()
                 const result1 = await client.callTool(`chat-${harness}`,

@@ -19,6 +19,11 @@ interface McpToolResult {
     content?: { type: string, text?: string }[]
 }
 
+/*  the parameters of a "codex/event" progress notification (the minimal subset needed here)  */
+interface CodexEventParams {
+    msg?: { type?: string, rollout_path?: string }
+}
+
 /*  the OpenAI Codex CLI driver  */
 export const codexDriver: HarnessDriver = {
     /*  the per-harness authentication and configuration relocation
@@ -68,21 +73,14 @@ export const codexDriver: HarnessDriver = {
 
     /*  spawn a persistent worker process (verified against 0.14x): the
         "codex mcp-server" subcommand runs Codex as an MCP stdio server
-        exposing a single "codex" tool, where every tool call runs a
-        fresh, isolated session -- so the process lives across requests
-        while the requests stay isolated. The subcommand offers no
-        "--ignore-user-config" or "--ephemeral" flags, so the user-level
-        configuration is neutralized via "-c" overrides instead (empty
-        MCP server set, tool surfaces off) and the session rollout
-        files are persisted under "$CODEX_HOME/sessions", exactly as
-        with regular interactive Codex use ("-c ephemeral=true" is
-        verifiably ignored, and relocating "$CODEX_HOME" would break
-        the auth token refresh) -- so their paths are harvested from
-        the "session_configured" events and the files are removed again
-        on worker disposal, restoring the leave-no-trace semantics of
-        the one-shot mode. The per-call arguments provide the sandbox
-        and approval hardening, plus a proper system prompt channel
-        ("base-instructions") which the "exec" subcommand lacks  */
+        whose single "codex" tool runs every call as a fresh, isolated
+        session. Lacking "--ignore-user-config" and "--ephemeral", the
+        user-level configuration is neutralized via "-c" overrides, and
+        the session rollout files (harvested from "session_configured"
+        events) are removed on worker disposal ("-c ephemeral=true" is
+        ignored and relocating "$CODEX_HOME" breaks the auth token
+        refresh). The per-call arguments provide the sandbox and approval
+        hardening plus the "base-instructions" system prompt channel  */
     async spawnWorker (config: HarnessConfig, dir: string, env: Record<string, string>): Promise<HarnessWorker> {
         const args = [
             "mcp-server",
@@ -111,8 +109,9 @@ export const codexDriver: HarnessDriver = {
             if (msg.id !== undefined && msg.method !== undefined)
                 rpc.respondError(msg.id, -32601, "not supported by mcp-to-harness")
             else if (msg.method === "codex/event") {
-                const event = (msg.params as { msg?: { type?: string, rollout_path?: string } })?.msg
-                if (event?.type === "session_configured" && typeof event.rollout_path === "string")
+                const event = (msg.params as CodexEventParams | undefined)?.msg
+                if (event?.type === "session_configured" && typeof event.rollout_path === "string"
+                    && path.isAbsolute(event.rollout_path) && event.rollout_path.endsWith(".jsonl"))
                     rolloutFiles.push(event.rollout_path)
             }
         })
@@ -152,7 +151,7 @@ export const codexDriver: HarnessDriver = {
                 if (isBroken)
                     throw new Error("harness CLI worker process is broken")
                 const work = (async (): Promise<string> => {
-                    const args: Record<string, unknown> = {
+                    const args: Record<string, string> = {
                         prompt,
                         "cwd":             dir,
                         "sandbox":         "read-only",
@@ -168,8 +167,10 @@ export const codexDriver: HarnessDriver = {
                         .filter((block) => block.type === "text")
                         .map((block) => block.text ?? "")
                         .join("")
-                    if (result.isError === true)
-                        throw new Error(`harness CLI failed${text.trim() !== "" ? `: ${text.trim()}` : ""}`)
+                    if (result.isError === true) {
+                        const detail = text.trim()
+                        throw new Error(detail !== "" ? `harness CLI failed: ${detail}` : "harness CLI failed")
+                    }
                     return text
                 })()
                 return raceDeadline(work, timeoutMs, signal, () => {

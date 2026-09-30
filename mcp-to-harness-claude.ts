@@ -84,7 +84,7 @@ export const claudeDriver: HarnessDriver = {
         /*  track the worker state: the FIFO of turns awaiting their
             "result" event, a tail of the stderr output for diagnostics,
             and whether the process is still usable  */
-        const pending: { resolve: (event: ClaudeEvent) => void, reject: (error: Error) => void }[] = []
+        const pending: PromiseWithResolvers<ClaudeEvent>[] = []
         const stderrTail = onTail(child.stderr)
         let isBroken = false
         let isVirgin = true
@@ -108,10 +108,10 @@ export const claudeDriver: HarnessDriver = {
         /*  correlate emitted "result" events with the pending turns
             (all other event types are progress noise and are ignored)  */
         onLines(child.stdout, (line) => {
-            let event: ClaudeEvent
-            try { event = JSON.parse(line) as ClaudeEvent }
+            let event: ClaudeEvent | null
+            try { event = JSON.parse(line) as ClaudeEvent | null }
             catch { return } /* intentionally ignored: non-JSON noise line */
-            if (event.type === "result") {
+            if (event?.type === "result") {
                 const entry = pending.shift()
                 if (entry !== undefined)
                     entry.resolve(event)
@@ -129,8 +129,7 @@ export const claudeDriver: HarnessDriver = {
         const turn = (text: string): Promise<ClaudeEvent> => {
             if (isBroken)
                 return Promise.reject(new Error("harness CLI worker process is broken"))
-            const { promise, resolve, reject } = Promise.withResolvers<ClaudeEvent>()
-            const entry = { resolve, reject }
+            const entry = Promise.withResolvers<ClaudeEvent>()
             pending.push(entry)
             try {
                 child.stdin.write(JSON.stringify({
@@ -145,7 +144,7 @@ export const claudeDriver: HarnessDriver = {
                     pending.splice(idx, 1)
                 throw err
             }
-            return promise
+            return entry.promise
         }
 
         /*  expose the harness worker interface  */
@@ -167,8 +166,10 @@ export const claudeDriver: HarnessDriver = {
                     }
                     isVirgin = false
                     const event = await turn(neutralizePrompt(prompt))
-                    if (event.subtype !== "success" || event.is_error === true)
-                        throw new Error(`harness CLI failed (${event.subtype ?? "unknown"})`)
+                    if (event.subtype !== "success" || event.is_error === true) {
+                        const detail = event.result?.trim() ?? ""
+                        throw new Error(`harness CLI failed (${event.subtype ?? "unknown"})${detail !== "" ? `: ${detail}` : ""}`)
+                    }
                     return event.result ?? ""
                 })()
                 return raceDeadline(work, timeoutMs, signal, () => {

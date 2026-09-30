@@ -104,29 +104,36 @@ const opts = program.opts<{
     harnessPoolIdle: string
 }>()
 
+/*  treat empty option values (e.g. "HARNESS_MODEL=" in a .env file) as absent  */
+const nonEmpty = (value?: string): string | undefined =>
+    value !== undefined && value.trim() !== "" ? value : undefined
+
 /*  resolve the effective configuration and ensure all required values are present  */
-const SERVICE           = opts.service        ?? fatal("service required (use --service or $SERVICE)")
-const MCP_TOOL          = opts.mcpTool        ?? fatal("MCP tool required (use --mcp-tool or $MCP_TOOL)")
-const HARNESS           = opts.harness        ?? fatal("harness type required (use --harness or $HARNESS)")
-const HARNESS_COMMAND   = opts.harnessCommand ?? HARNESS
-const HARNESS_MODEL     = opts.harnessModel
-const HARNESS_PROMPT    = opts.harnessPrompt
+const SERVICE           = nonEmpty(opts.service)        ?? fatal("service required (use --service or $SERVICE)")
+const MCP_TOOL          = nonEmpty(opts.mcpTool)        ?? fatal("MCP tool required (use --mcp-tool or $MCP_TOOL)")
+const HARNESS           = opts.harness                  ?? fatal("harness type required (use --harness or $HARNESS)")
+const HARNESS_COMMAND   = nonEmpty(opts.harnessCommand) ?? HARNESS
+const HARNESS_MODEL     = nonEmpty(opts.harnessModel)
+const HARNESS_PROMPT    = nonEmpty(opts.harnessPrompt)
 const HARNESS_TIMEOUT   = opts.harnessTimeout
 const HARNESS_POOL      = opts.harnessPool
 const HARNESS_POOL_IDLE = opts.harnessPoolIdle
 
+/*  the maximum delay supported by Node.js timers (larger values fire immediately)  */
+const timerMaxMs = 2 ** 31 - 1
+
 /*  parse and validate the execution timeout  */
 const timeoutMs = Number(HARNESS_TIMEOUT)
-if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
-    fatal(`invalid harness timeout "${HARNESS_TIMEOUT}" (use a positive integer of milliseconds)`)
+if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > timerMaxMs)
+    fatal(`invalid harness timeout "${HARNESS_TIMEOUT}" (use a positive integer of milliseconds up to ${timerMaxMs})`)
 
 /*  parse and validate the worker pool size and idle timeout  */
 const poolSize = Number(HARNESS_POOL)
 if (!Number.isSafeInteger(poolSize) || poolSize < 0)
     fatal(`invalid harness pool size "${HARNESS_POOL}" (use a non-negative integer)`)
 const poolIdleMs = Number(HARNESS_POOL_IDLE)
-if (!Number.isSafeInteger(poolIdleMs) || poolIdleMs <= 0)
-    fatal(`invalid harness pool idle timeout "${HARNESS_POOL_IDLE}" (use a positive integer of milliseconds)`)
+if (!Number.isSafeInteger(poolIdleMs) || poolIdleMs <= 0 || poolIdleMs > timerMaxMs)
+    fatal(`invalid harness pool idle timeout "${HARNESS_POOL_IDLE}" (use a positive integer of milliseconds up to ${timerMaxMs})`)
 
 /*  the maximum number of requests served by a single pool worker before
     it is recycled (insurance against slow resource accumulation inside
