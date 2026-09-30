@@ -83,7 +83,7 @@ program
         "    --transport stdio \\\n" +
         "    -- \\\n" +
         "    chat-openai-codex \\\n" +
-        `    ${pkg.name} \\\n` +
+        `    npx ${pkg.name} \\\n` +
         "      --service       \"OpenAI Codex\" \\\n" +
         "      --mcp-tool      chat-openai-codex \\\n" +
         "      --harness       codex \\\n" +
